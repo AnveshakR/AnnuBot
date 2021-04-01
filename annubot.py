@@ -122,17 +122,11 @@ async def play(ctx, *, query):
     if ctx.voice_client is None:
         if ctx.author.voice:
             await ctx.author.voice.channel.connect()
-            source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(query))
-            ctx.voice_client.play(source, after=lambda e: print('Player error: %s' % e) if e else None)
-            #source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(os.path.join(save_path,title)))
-            #ctx.voice_client.play(source, after=lambda e: print('Player error: %s' % e) if e else None)
-            await ctx.send('Now playing: {}'.format(title))
 
-
-        else:
-            await ctx.send("You are not connected to a voice channel.")
-            raise commands.CommandError("Author not connected to a voice channel.")
-    
+    source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(r'C:\Users\anves\Documents\Python Scripts\YT audio puller\Sieshin.mp3'))
+    #source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(os.path.join(save_path,title)))
+    ctx.voice_client.play(source, after=lambda e: print('Player error: %s' % e) if e else None)
+    #await ctx.send('Now playing: {}'.format(title))
 
 
 bot.run(DISCORD_TOKEN)
