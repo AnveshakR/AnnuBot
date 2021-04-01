@@ -9,8 +9,8 @@ from dotenv import load_dotenv
 import os
 import discord
 from discord.ext import commands
-chrome_path = r"C:\Users\anves\Documents\chromedriver\chromedriver.exe"
-save_path = r"C:\Users\anves\Documents\Python Scripts\YT audio puller\temp"
+chrome_path = r"D:\Projects\Chromedriver\chromedriver.exe"
+save_path = r"D:\Projects\Anveshak Projects\AnnuBot\temp"
 
 
 #spotify setup
@@ -37,7 +37,7 @@ def mp3download(link):
     ydl_opts = {
         'format': "bestaudio/best",
         'extractaudio':True,
-        'outtmpl': r'C:\Users\anves\Documents\Python Scripts\YT audio puller\temp\%(title)s.%(ext)s',
+        'outtmpl': r'D:\Projects\Anveshak Projects\AnnuBot\temp\%(title)s.%(ext)s',
         'postprocessors':[{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -115,18 +115,24 @@ async def join(ctx):
         await ctx.send("You are not connected to a voice channel.")
         raise commands.CommandError("Author not connected to a voice channel.")
 
+@bot.command(name = 'fuckoff', pass_context=True)
+async def remove(ctx):
+    await ctx.channel.send('Anu Malik fuck off nahi hota')
+
+
 @bot.command(name='play', pass_context=True)
 async def play(ctx, *, query):
 
-    #title = request(query)
+    title = request(query)
     if ctx.voice_client is None:
         if ctx.author.voice:
             await ctx.author.voice.channel.connect()
 
-    source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(r'C:\Users\anves\Documents\Python Scripts\YT audio puller\Sieshin.mp3'))
-    #source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(os.path.join(save_path,title)))
+    #source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(r'C:\Users\anves\Documents\Python Scripts\YT audio puller\Sieshin.mp3'))
+    source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(os.path.join(save_path,(title+".mp3"))))
     ctx.voice_client.play(source, after=lambda e: print('Player error: %s' % e) if e else None)
-    #await ctx.send('Now playing: {}'.format(title))
+    await ctx.send('Now playing: {}'.format(title))
+    print(os.path.join(save_path,(title+".mp3")))
 
 
 bot.run(DISCORD_TOKEN)
