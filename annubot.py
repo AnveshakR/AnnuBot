@@ -35,6 +35,7 @@ spotify_base = 'https://api.spotify.com/v1/tracks/{id}'
 
 ydl_opts = {
         'format': "bestaudio/best",
+        'highWaterMark': 33554432,
         'extractaudio':True,
         'outtmpl': r'C:\Users\anves\Documents\Python Scripts\YT audio puller\temp\%(title)s.%(ext)s',
         'postprocessors':[{
@@ -110,6 +111,8 @@ def request(query):
         link = ytpull(query)
     return link
 
+queue=[]
+
 bot = commands.Bot(command_prefix='annu ')
 
 @bot.event
@@ -124,6 +127,10 @@ async def join(ctx):
     else:
         await ctx.send("You are not connected to a voice channel.")
         raise commands.CommandError("Author not connected to a voice channel.")
+
+@bot.command(name='disconnect', aliases=['nikal'])
+async def dc(ctx):
+    await ctx.voice_client.disconnect()
 
 @bot.command(name = 'fuckoff', pass_context=True)
 async def remove(ctx):
@@ -149,13 +156,14 @@ async def remove(ctx):
 @bot.command(name='play', pass_context=True)
 async def play(ctx, *, query):
 
+    if ctx.voice.
+
     url = request(query)
     if ctx.voice_client is None:
         if ctx.author.voice:
             await ctx.author.voice.channel.connect()
 
     source = await mp3download(url, loop=bot.loop, stream=True)
-    #source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(os.path.join(save_path,(title+".mp3"))))
     ctx.voice_client.play(source[0], after=lambda e: print('Player error: %s' % e) if e else None)
     await ctx.send('Now playing: {}'.format(source[1]))
 
