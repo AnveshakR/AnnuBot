@@ -7,6 +7,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from dotenv import load_dotenv
 import os
+import random
 import discord
 from discord.ext import commands
 chrome_path = r"D:\Projects\Chromedriver\chromedriver.exe"
@@ -118,6 +119,22 @@ async def join(ctx):
 @bot.command(name = 'fuckoff', pass_context=True)
 async def remove(ctx):
     await ctx.channel.send('Anu Malik fuck off nahi hota')
+
+
+@bot.command(name = 'irshad', aliases=['sher'], pass_context=True)
+async def remove(ctx):
+    sher = ['“Tumne bachchon ke saath dance kiya ringa-ringa rosy, Oh my God, I was feeling so cozy!!!”',
+            '“Jungle ka raja hota hai ek sher, jaldi karo pack up, ho gayi hai der…”',
+            '“Tera loha ka badan hai bada kaam ka, aa gaya hai season aam ka…”',
+            '“Chura ke dil mera goriya chali, tere jaise singers ghumte hai gali gali…”',
+            '“Tan tana tan tan tan tara, singer banne ka sochna bhi mat dobara…”',
+            '“Tumse mile dil me utha dard karara, agar gala thik karna hai toh roz karo garara…”',
+            '“Aaj tune kara aisa act, jispe karna pada mujhe react, this was one of the best yahi hai fact…”',
+            '“Oonchi hai building, lift teri band hai, chhad ke nahi aa sakta, pairon me bada dard hai…”',
+            '“Sur, lay, taal, sab bhatki hui hai, nirmal baba se pata karo ki kripya kaha atki hui hai…”',
+            '“Tum ho paanch sundariyaan, aur main akela ladka, ise kehte haim daal me tadka…”']
+    await ctx.channel.send('Annu says: {}'.format(random.choice(sher)))
+
 
 
 @bot.command(name='play', pass_context=True)
