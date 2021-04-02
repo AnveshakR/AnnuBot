@@ -9,12 +9,13 @@ from dotenv import load_dotenv
 import os
 import random
 import discord
+import asyncio
 from discord.ext import commands
-chrome_path = r"D:\Projects\Chromedriver\chromedriver.exe"
-save_path = r"D:\Projects\Anveshak Projects\AnnuBot\temp"
+chrome_path = r"C:\Users\anves\Documents\chromedriver\chromedriver.exe"
+save_path = r"C:\Users\anves\Documents\Python Scripts\YT audio puller\temp"
 
 
-#spotify setup
+#setup
 load_dotenv()
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 SPOTIFY_ID = os.getenv('SPOTIFY_ID')
@@ -32,13 +33,10 @@ headers = {
 }
 spotify_base = 'https://api.spotify.com/v1/tracks/{id}'
 
-
-
-def mp3download(link):
-    ydl_opts = {
+ydl_opts = {
         'format': "bestaudio/best",
         'extractaudio':True,
-        'outtmpl': r'D:\Projects\Anveshak Projects\AnnuBot\temp\%(title)s.%(ext)s',
+        'outtmpl': r'C:\Users\anves\Documents\Python Scripts\YT audio puller\temp\%(title)s.%(ext)s',
         'postprocessors':[{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -47,14 +45,25 @@ def mp3download(link):
         'ffmpeg-location':r'ffmpeg.exe',
         'quiet':True
     }
-    title = ""
-    with youtube_dl.YoutubeDL(ydl_opts) as ydl:
-        meta = ydl.extract_info(link)
-        if(int(meta['duration'])<600):
-            title = meta['title']
-            return title
-        else:
-            return False
+ytdl = youtube_dl.YoutubeDL(ydl_opts)
+
+
+async def mp3download(url,*,loop=None, stream=False):
+    loop = loop or asyncio.get_event_loop()
+    data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
+    if 'entries' in data:
+        data = data['entries'][0]
+    filename = data['url'] if stream else ytdl.prepare_filename(data)
+    return (discord.FFmpegPCMAudio(filename),data['title'])
+
+#def mp3download(link):
+#    title = ""
+#    meta = ytdl.extract_info(link)
+#    if(int(meta['duration'])<600):
+#        title = meta['title']
+#        return title
+#    else:
+#        return False
 
 
 
@@ -83,23 +92,23 @@ def spotifypull(uri):
 
 
 def request(query):
-    name = ""
+    link = ""
     if query.find("https://") != -1:
 
         if query.find("youtube.com/watch") != -1 or query.find("youtu.be/") != -1:
-            name = mp3download(query)
+            link = query
 
         if query.find("spotify") !=-1:
             uri = query[31:53]
-            name = mp3download(spotifypull(uri))
+            link = spotifypull(uri)
 
     elif query.find("spotify:track") !=-1:
         uri = query[14:]
-        name = mp3download(spotifypull(uri))
+        link = spotifypull(uri)
 
     else:
-        name = mp3download(ytpull(query))
-    return name
+        link = ytpull(query)
+    return link
 
 bot = commands.Bot(command_prefix='annu ')
 
@@ -140,16 +149,15 @@ async def remove(ctx):
 @bot.command(name='play', pass_context=True)
 async def play(ctx, *, query):
 
-    title = request(query)
+    url = request(query)
     if ctx.voice_client is None:
         if ctx.author.voice:
             await ctx.author.voice.channel.connect()
 
-    #source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(r'C:\Users\anves\Documents\Python Scripts\YT audio puller\Sieshin.mp3'))
-    source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(os.path.join(save_path,(title+".mp3"))))
-    ctx.voice_client.play(source, after=lambda e: print('Player error: %s' % e) if e else None)
-    await ctx.send('Now playing: {}'.format(title))
-    print(os.path.join(save_path,(title+".mp3")))
+    source = await mp3download(url, loop=bot.loop, stream=True)
+    #source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(os.path.join(save_path,(title+".mp3"))))
+    ctx.voice_client.play(source[0], after=lambda e: print('Player error: %s' % e) if e else None)
+    await ctx.send('Now playing: {}'.format(source[1]))
 
 
 bot.run(DISCORD_TOKEN)
