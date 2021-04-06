@@ -14,6 +14,7 @@ SPOTIFY_ID = os.getenv('SPOTIFY_ID')
 SPOTIFY_SECRET = os.getenv('SPOTIFY_SECRET')
 API_KEY = os.getenv('YT_KEY')
 AUTH_URL = 'https://accounts.spotify.com/api/token'
+ytbase = "https://www.youtube.com/watch?v="
 auth_response = requests.post(AUTH_URL, {
     'grant_type': 'client_credentials',
     'client_id': SPOTIFY_ID,
@@ -38,7 +39,7 @@ with open(filepath,encoding='utf8') as fp:
 
 ydl_opts = {
         'format': "bestaudio/best",
-        'highWaterMark': 33554432,
+        'highWaterMark': 1<<25,
         'extractaudio':True,
         'outtmpl': r'\temp\%(title)s.%(ext)s',
         'postprocessors':[{
@@ -58,10 +59,9 @@ async def audiostream(url,*,loop=None, stream=False):
     if 'entries' in data:
         data = data['entries'][0]
     filename = data['url'] if stream else ytdl.prepare_filename(data)
-    return (discord.FFmpegPCMAudio(filename),data['title'])
+    return (discord.FFmpegPCMAudio(filename),data)
 
 def ytpull(song):
-    ytbase = "https://www.youtube.com/watch?v="
     response = requests.get('https://youtube.googleapis.com/youtube/v3/search?q={}&key={}'.format(song,API_KEY))
     data = response.json()
     link = ytbase + data['items'][0]['id']['videoId']
@@ -109,6 +109,11 @@ def request(query,bool):
 
 bot = commands.Bot(command_prefix='annu ')
 
+playerembed = discord.Embed(
+    title = "Now Playing",
+    color = discord.Colour(0x7289DA)
+)
+
 @bot.event
 async def on_ready():
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="annu"))
@@ -151,8 +156,13 @@ async def play(ctx, *, query):
             await ctx.author.voice.channel.connect()
 
     source = await audiostream(url, loop=bot.loop, stream=True)
+    data = source[1]
+    title = data['title']
+    ytid = data['id']
     ctx.voice_client.play(source[0], after=lambda e: print('Player error: %s' % e) if e else None)
-    await ctx.send('Now playing: {}'.format(source[1]))
+    playerembed.set_image(url=data['thumbnail'])
+    playerembed.description="[{}]({})".format(title,ytbase+ytid)
+    await ctx.send(embed=playerembed)
 
 @bot.command(name='lplay', pass_context=True)
 async def play(ctx, *, query):
@@ -162,8 +172,13 @@ async def play(ctx, *, query):
             await ctx.author.voice.channel.connect()
 
     source = await audiostream(url, loop=bot.loop, stream=True)
+    data = source[1]
+    title = data['title']
+    ytid = data['id']
     ctx.voice_client.play(source[0], after=lambda e: print('Player error: %s' % e) if e else None)
-    await ctx.send('Now playing: {}'.format(source[1]))
+    playerembed.set_image(url=data['thumbnail'])
+    playerembed.description="[{}]({})".format(title,ytbase+ytid)
+    await ctx.send(embed=playerembed)
 
 
 bot.run(DISCORD_TOKEN)
