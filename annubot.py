@@ -71,9 +71,8 @@ def ytpull(song):
 
 def spotifypull(uri):
     r = requests.get(spotify_base.format(id=uri), headers=headers)
-    r = r.json()
-    name = r['name']+" "+r['artists'][0]['name']
-    return name
+    r = r.json() 
+    return (r['name']+" "+r['artists'][0]['name'])
 
 
 
