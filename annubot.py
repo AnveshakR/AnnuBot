@@ -127,51 +127,53 @@ def request(query,bool):
 
         if query.find("youtube.com/watch") != -1 or query.find("youtu.be/") != -1:
             videoId = ''
-            if query.find("youtube.com/watch") != -1:
+            if query.find("youtube.com/watch") != -1 and query.find("&ab_channel") != -1:
                 videoId = query[query.find("/watch?v=")+9:query.find("&ab_channel")]
+            elif query.find("youtube.com/watch") != -1:
+                videoId = query[query.find("/watch?v=")+9:]
             elif query.find("youtu.be/") != -1 and query.find("?t=") !=-1:
                 videoId = query[query.find("youtu.be/")+9:query.find("?t=")]
             elif query.find("youtu.be/") != -1:
                 videoId = query[query.find("youtu.be/")+9:]
-        response2 = requests.get('https://youtube.googleapis.com/youtube/v3/videos?part=contentDetails&id={}&key={}'.format(videoId,API_KEY))
-        data = response2.json()
-        link = ytbase + data['items'][0]['id']
-        length = data['items'][0]['contentDetails']['duration'][2:]
-        hour = False
-        minute = False
-        if(length.find('H') != -1 and length != ""):
-            hours = length[:length.find('H')]
-            if len(hours) == 1:
-                hours = '0' + hours
-            time = time + hours + ':'
-            length = length[length.find('H')+1:]
-            hour = True
+            response2 = requests.get('https://youtube.googleapis.com/youtube/v3/videos?part=contentDetails&id={}&key={}'.format(videoId,API_KEY))
+            data2 = response2.json()
+            link = ytbase + data2['items'][0]['id']
+            length = data2['items'][0]['contentDetails']['duration'][2:]
+            hour = False
+            minute = False
+            if(length.find('H') != -1 and length != ""):
+                hours = length[:length.find('H')]
+                if len(hours) == 1:
+                    hours = '0' + hours
+                time = time + hours + ':'
+                length = length[length.find('H')+1:]
+                hour = True
 
 
-        if(length.find('M') != -1 and length != ""):
-            minutes = length[:length.find('M')]
-            if len(minutes) == 1:
-                minutes = '0' + minutes
-            time = time + minutes + ':'
-            length = length[length.find('M')+1:]
-            minute = True
+            if(length.find('M') != -1 and length != ""):
+                minutes = length[:length.find('M')]
+                if len(minutes) == 1:
+                    minutes = '0' + minutes
+                time = time + minutes + ':'
+                length = length[length.find('M')+1:]
+                minute = True
 
-        elif(hour==True):
-            time = time + "00:"
+            elif(hour==True):
+                time = time + "00:"
 
 
-        if(length.find('S') != -1 and length != ""):
-            seconds = length[:length.find('S')]
-            if len(seconds) == 1:
-                seconds = '0' + seconds
-            time = time + seconds
-        elif(hour==True and minute==False):
-            time = time + "00"
-        else:
-            time = time + "00"
+            if(length.find('S') != -1 and length != ""):
+                seconds = length[:length.find('S')]
+                if len(seconds) == 1:
+                    seconds = '0' + seconds
+                time = time + seconds
+            elif(hour==True and minute==False):
+                time = time + "00"
+            else:
+                time = time + "00"
 
-        if(hour==False and minute==False):
-            time = ":" + time
+            if(hour==False and minute==False):
+                time = ":" + time
 
 
     if query.find("spotify") !=-1:
