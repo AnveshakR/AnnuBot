@@ -232,6 +232,22 @@ async def remove(ctx):
 async def remove(ctx):
     await ctx.channel.send('Annu says: {}'.format(random.choice(sher)))
     
+@bot.command(name = 'fangs')
+async def fangs(ctx):
+    if ctx.voice_client is None:
+        if ctx.author.voice:
+            await ctx.author.voice.channel.connect()
+    seishin = "https://youtu.be/gBmxCcHtY2Y"
+    time = "3:25"
+    source = await audiostream(seishin, loop=bot.loop, stream=True)
+    data = source[1]
+    title = data['title']
+    ytid = data['id']
+    ctx.voice_client.play(source[0], after=lambda e: print('Player error: %s' % e) if e else None)
+    playerembed.set_image(url=data['thumbnail'])
+    playerembed.description="[{}]({}) [{}]".format(title,ytbase+ytid,time)
+    await ctx.send(embed=playerembed)
+    
 
 @bot.command(name='play', pass_context=True)
 async def play(ctx, *, query):
