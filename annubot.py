@@ -225,7 +225,8 @@ async def dc(ctx):
 
 @bot.command(name = 'fuckoff', aliases=['fuck off'], pass_context=True)
 async def remove(ctx):
-    await ctx.channel.send('Anu Malik fuck off nahi hota')
+    fuckoffs = ['Tu hota kaun hai','Anu Malik fuck off nahi hota','Tere baap ka naukar hu kya','Tu fuckoff']
+    await ctx.channel.send(random.choice(fuckoffs))
 
 
 @bot.command(name = 'irshad', aliases=['sher'], pass_context=True)
