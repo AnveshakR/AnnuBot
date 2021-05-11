@@ -199,6 +199,8 @@ def request(query,bool):
             link,time = ytpull(query)
     return link,time
 
+queue = []
+
 bot = commands.Bot(command_prefix='annu ')
 
 playerembed = discord.Embed(
@@ -252,10 +254,18 @@ async def fangs(ctx):
 
 @bot.command(name='play', pass_context=True)
 async def play(ctx, *, query):
+
+    if ctx.voice_client.is_playing()==True:
+        queue.append(query)
+        return
+    
     url,time = request(query,False)
+
     if ctx.voice_client is None:
         if ctx.author.voice:
             await ctx.author.voice.channel.connect()
+        else:
+            await ctx.send("Join a voice channel!")
 
     source = await audiostream(url, loop=bot.loop, stream=True)
     data = source[1]
@@ -265,13 +275,22 @@ async def play(ctx, *, query):
     playerembed.set_image(url=data['thumbnail'])
     playerembed.description="[{}]({}) [{}]".format(title,ytbase+ytid,time)
     await ctx.send(embed=playerembed)
+
 
 @bot.command(name='lplay', pass_context=True)
 async def play(ctx, *, query):
+
+    if ctx.voice_client.is_playing()==True:
+        queue.append(query)
+        return
+
     url,time = request(query,True)
+
     if ctx.voice_client is None:
         if ctx.author.voice:
             await ctx.author.voice.channel.connect()
+        else:
+            await ctx.send("Join a voice channel!")
 
     source = await audiostream(url, loop=bot.loop, stream=True)
     data = source[1]
@@ -281,6 +300,30 @@ async def play(ctx, *, query):
     playerembed.set_image(url=data['thumbnail'])
     playerembed.description="[{}]({}) [{}]".format(title,ytbase+ytid,time)
     await ctx.send(embed=playerembed)
+
+@bot.command(name='pause')
+async def pause(ctx):
+    if ctx.voice_client.is_playing():
+        ctx.voice_client.pause()
+    else:
+        await ctx.send("Music already paused. Do you mean to resume?")
+
+@bot.command(name='resume')
+async def resume(ctx):
+    if ctx.voice_client.is_paused():
+        ctx.voice_client.resume()
+    else:
+        await ctx.send("Music already playing. Do you mean to pause?")
+
+async def continue(url,time):
+    source = await audiostream(url, loop=bot.loop, stream=True)
+    data = source[1]
+    title = data['title']
+    ytid = data['id']
+    bot.voice_client.play(source[0], after=lambda e: print('Player error: %s' % e) if e else None)
+    playerembed.set_image(url=data['thumbnail'])
+    playerembed.description="[{}]({}) [{}]".format(title,ytbase+ytid,time)
+    await bot.send(embed=playerembed)
 
 
 bot.run(DISCORD_TOKEN)
