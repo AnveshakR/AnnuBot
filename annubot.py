@@ -315,15 +315,15 @@ async def resume(ctx):
     else:
         await ctx.send("Music already playing. Do you mean to pause?")
 
-async def continue(url,time):
-    source = await audiostream(url, loop=bot.loop, stream=True)
-    data = source[1]
-    title = data['title']
-    ytid = data['id']
-    bot.voice_client.play(source[0], after=lambda e: print('Player error: %s' % e) if e else None)
-    playerembed.set_image(url=data['thumbnail'])
-    playerembed.description="[{}]({}) [{}]".format(title,ytbase+ytid,time)
-    await bot.send(embed=playerembed)
+# async def continue(url,time):
+#     source = await audiostream(url, loop=bot.loop, stream=True)
+#     data = source[1]
+#     title = data['title']
+#     ytid = data['id']
+#     bot.voice_client.play(source[0], after=lambda e: print('Player error: %s' % e) if e else None)
+#     playerembed.set_image(url=data['thumbnail'])
+#     playerembed.description="[{}]({}) [{}]".format(title,ytbase+ytid,time)
+#     await bot.send(embed=playerembed)
 
 
 bot.run(DISCORD_TOKEN)
