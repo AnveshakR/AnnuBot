@@ -199,7 +199,7 @@ def request(query,bool):
             link,time = ytpull(query)
     return link,time
 
-queue = []
+# queue = []
 
 bot = commands.Bot(command_prefix='annu ')
 
@@ -255,9 +255,9 @@ async def fangs(ctx):
 @bot.command(name='play', pass_context=True)
 async def play(ctx, *, query):
 
-    if ctx.voice_client.is_playing()==True:
-        queue.append(query)
-        return
+    # if ctx.voice_client.is_playing()==True:
+    #     queue.append(query)
+    #     return
     
     url,time = request(query,False)
 
@@ -280,9 +280,9 @@ async def play(ctx, *, query):
 @bot.command(name='lplay', pass_context=True)
 async def play(ctx, *, query):
 
-    if ctx.voice_client.is_playing()==True:
-        queue.append(query)
-        return
+    # if ctx.voice_client.is_playing()==True:
+    #     queue.append(query)
+    #     return
 
     url,time = request(query,True)
 
