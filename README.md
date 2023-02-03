@@ -6,7 +6,7 @@ Discord music player with a bit of spice :hot_pepper::hot_pepper:
 
 Prefix for this bot is **annu**
 
-==*Now supports slash commands!*==
+> *Now supports slash commands!*
 
 ## Commands
 * _play_: Plays your requested song
