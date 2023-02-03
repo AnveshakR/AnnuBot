@@ -6,6 +6,7 @@ import random
 import discord
 import asyncio
 from discord.ext import commands
+from discord import app_commands
 
 #setup
 load_dotenv()
@@ -199,9 +200,10 @@ def request(query,bool):
             link,time = ytpull(query)
     return link,time
 
-# queue = []
+intents = discord.Intents.default()
+intents.message_content = True
 
-bot = commands.Bot(command_prefix='annu ')
+bot = commands.Bot(command_prefix='annu ', intents=intents)
 
 playerembed = discord.Embed(
     title = "Now Playing",
@@ -210,9 +212,10 @@ playerembed = discord.Embed(
 
 @bot.event
 async def on_ready():
-    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="annu"))
+    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="annu help"))
+    await bot.tree.sync()
 
-@bot.command(name = 'join', aliases=['connect'], pass_context=True)
+@bot.hybrid_command(name = 'join', description = "Joins your voice channel", aliases=['connect'], pass_context=True)
 async def join(ctx):
 
     if ctx.author.voice:
@@ -221,21 +224,21 @@ async def join(ctx):
         await ctx.send("You are not connected to a voice channel.")
         raise commands.CommandError("Author not connected to a voice channel.")
 
-@bot.command(name='disconnect', aliases=['nikal','leave'])
+@bot.hybrid_command(name='disconnect', description = "Leaves your voice channel", aliases=['nikal','leave'])
 async def dc(ctx):
     await ctx.voice_client.disconnect()
 
-@bot.command(name = 'fuckoff', aliases=['fuck off'], pass_context=True)
-async def remove(ctx):
+@bot.hybrid_command(name = 'fuckoff',description = "Try it ;)", aliases=['fuck off'], pass_context=True)
+async def fuckoff(ctx):
     fuckoffs = ['Tu hota kaun hai','Anu Malik fuck off nahi hota','Tere baap ka naukar hu kya','Tu fuckoff']
-    await ctx.channel.send(random.choice(fuckoffs))
+    await ctx.send(random.choice(fuckoffs))
 
+@bot.hybrid_command(name = 'irshad',description = "Delivers a true-blue Anu Malik shayari", aliases=['sher'], pass_context=True)
+async def shayari(ctx):
+    await ctx.send('Annu says: {}'.format(random.choice(sher)))
 
-@bot.command(name = 'irshad', aliases=['sher'], pass_context=True)
-async def remove(ctx):
-    await ctx.channel.send('Annu says: {}'.format(random.choice(sher)))
     
-@bot.command(name = 'fangs')
+@bot.hybrid_command(name = 'fangs', description = "Plays Sheishen by Keylo X FANGS")
 async def fangs(ctx):
     if ctx.voice_client is None:
         if ctx.author.voice:
@@ -252,7 +255,7 @@ async def fangs(ctx):
     await ctx.send(embed=playerembed)
     
 
-@bot.command(name='play', pass_context=True)
+@bot.hybrid_command(name='play', description = "Plays your song by name/YT/Spotify URL", pass_context=True)
 async def play(ctx, *, query):
 
     # if ctx.voice_client.is_playing()==True:
@@ -277,7 +280,7 @@ async def play(ctx, *, query):
     await ctx.send(embed=playerembed)
 
 
-@bot.command(name='lplay', pass_context=True)
+@bot.hybrid_command(name='lplay',description = "Same as plays but searches for lyric version", pass_context=True)
 async def play(ctx, *, query):
 
     # if ctx.voice_client.is_playing()==True:
@@ -301,29 +304,18 @@ async def play(ctx, *, query):
     playerembed.description="[{}]({}) [{}]".format(title,ytbase+ytid,time)
     await ctx.send(embed=playerembed)
 
-@bot.command(name='pause')
+@bot.hybrid_command(name='pause', description = "Pauses playback")
 async def pause(ctx):
     if ctx.voice_client.is_playing():
         ctx.voice_client.pause()
     else:
         await ctx.send("Music already paused. Do you mean to resume?")
 
-@bot.command(name='resume')
+@bot.hybrid_command(name='resume', description = "Resumes playback")
 async def resume(ctx):
     if ctx.voice_client.is_paused():
         ctx.voice_client.resume()
     else:
         await ctx.send("Music already playing. Do you mean to pause?")
-
-# async def continue(url,time):
-#     source = await audiostream(url, loop=bot.loop, stream=True)
-#     data = source[1]
-#     title = data['title']
-#     ytid = data['id']
-#     bot.voice_client.play(source[0], after=lambda e: print('Player error: %s' % e) if e else None)
-#     playerembed.set_image(url=data['thumbnail'])
-#     playerembed.description="[{}]({}) [{}]".format(title,ytbase+ytid,time)
-#     await bot.send(embed=playerembed)
-
 
 bot.run(DISCORD_TOKEN)

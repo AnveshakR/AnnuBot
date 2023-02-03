@@ -1,7 +1,6 @@
 requests==2.25.1
-youtube_dl==2021.4.1
-discord.py==1.6.0
-discord==1.0.1
+youtube_dl==2021.12.17
+discord.py==2.1.0
 python-dotenv==0.16.0
 asyncio==3.4.3
 PyNaCl==1.4.0
