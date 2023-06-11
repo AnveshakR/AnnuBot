@@ -23,7 +23,12 @@ Prefix for this bot is **annu**
 - General song name
 
 ## Example
+/play https://www.youtube.com/watch?v=dQw4w9WgXcQ
+*OR*
 annu play https://www.youtube.com/watch?v=dQw4w9WgXcQ
+
+## Known Issues
+- Songs may stop 10-15s before the actual end
 
 ## To-do
 - [ ] Implement queue for songs
@@ -40,3 +45,4 @@ SPOTIFY_ID = <your spotify id>
 SPOTIFY_SECRET = <your spotify secret>
 YT_KEY = <your google/youtube API key>
 ```
+You will need the FFMPEG binary (not the python module) referenced in PATH.
