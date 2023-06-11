@@ -24,7 +24,9 @@ Prefix for this bot is **annu**
 
 ## Example
 /play https://www.youtube.com/watch?v=dQw4w9WgXcQ
+
 *OR*
+
 annu play https://www.youtube.com/watch?v=dQw4w9WgXcQ
 
 ## Known Issues
