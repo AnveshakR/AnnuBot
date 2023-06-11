@@ -1,4 +1,3 @@
-import youtube_dl
 import yt_dlp
 import requests
 from dotenv import load_dotenv
@@ -7,7 +6,6 @@ import random
 import discord
 import asyncio
 from discord.ext import commands
-from discord import app_commands
 
 #setup
 load_dotenv()
