@@ -1,4 +1,3 @@
-import youtube_dl
 import yt_dlp
 import requests
 from dotenv import load_dotenv
