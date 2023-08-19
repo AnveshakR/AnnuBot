@@ -1,5 +1,5 @@
 import yt_dlp
-import requests
+from utils import *
 from dotenv import load_dotenv
 import os
 import random
@@ -10,12 +10,7 @@ from discord.ext import commands
 #setup
 load_dotenv()
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
-SPOTIFY_ID = os.getenv('SPOTIFY_ID')
-SPOTIFY_SECRET = os.getenv('SPOTIFY_SECRET')
-API_KEY = os.getenv('YT_KEY')
-AUTH_URL = 'https://accounts.spotify.com/api/token'
 ytbase = "https://www.youtube.com/watch?v="
-spotify_base = 'https://api.spotify.com/v1/tracks/{id}'
 
 filepath = 'sher.txt'
 with open(filepath,encoding='utf8') as fp:
@@ -36,145 +31,22 @@ yt_dlp_opts = {
     'http-chunk-size': 1024*32
 }
 
+ffmpeg_opts = {
+    'before_options': '-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn'
+    }
+
 # yt_dlp options
 ytdl = yt_dlp.YoutubeDL(yt_dlp_opts)
 
 # audio driver
-async def audiostream(url,*,loop=None, stream=False):
+async def audiostream(url,*,loop=None, stream=True):
     loop = loop or asyncio.get_event_loop()
-    data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
+    data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
     if 'entries' in data:
         data = data['entries'][0]
     filename = data['url'] if stream else ytdl.prepare_filename(data)
-    return (discord.FFmpegPCMAudio(filename),data)
-
-# get video info from YouTube API
-def ytpull(query, is_youtube_id=False):
-
-    # search for song by song ID if query is not a valid youtube ID
-    if not is_youtube_id:
-        get_video_id = requests.get('https://youtube.googleapis.com/youtube/v3/search?q={}&key={}'.format(query,API_KEY))
-        query = get_video_id.json()['items'][0]['id']['videoId'] # change query to youtube ID
-
-    # get video info for first search result
-    get_video_details = requests.get('https://youtube.googleapis.com/youtube/v3/videos?part=contentDetails&id={}&key={}'.format(query, API_KEY))
-    video_data = get_video_details.json()
-
-    link = ytbase + video_data['items'][0]['id'] # video link
-    video_length = video_data['items'][0]['contentDetails']['duration'][2:] # playtime
-    time = ''
-    hour = False
-    minute = False
-
-    # length string formatting
-    if(video_length.find('H') != -1 and video_length != ""):
-        hours = video_length[:video_length.find('H')]
-        if len(hours) == 1:
-            hours = '0' + hours
-        time = time + hours + ':'
-        video_length = video_length[video_length.find('H')+1:]
-        hour = True
-
-
-    if(video_length.find('M') != -1 and video_length != ""):
-        minutes = video_length[:video_length.find('M')]
-        if len(minutes) == 1:
-            minutes = '0' + minutes
-        time = time + minutes + ':'
-        video_length = video_length[video_length.find('M')+1:]
-        minute = True
-
-    elif(hour==True):
-        time = time + "00:"
-
-
-    if(video_length.find('S') != -1 and video_length != ""):
-        seconds = video_length[:video_length.find('S')]
-        if len(seconds) == 1:
-            seconds = '0' + seconds
-        time = time + seconds
-    elif(hour==True and minute==False):
-        time = time + "00"
-    else:
-        time = time + "00"
-
-    if(hour==False and minute==False):
-        time = ":" + time
-
-    return(link, time)
-
-
-# get song name from spotify URI using spotify API
-def spotifypull(uri):
-    auth_response = requests.post(AUTH_URL, {
-    'grant_type': 'client_credentials',
-    'client_id': SPOTIFY_ID,
-    'client_secret': SPOTIFY_SECRET,
-    })
-
-    auth_response_data = auth_response.json()
-    access_token = auth_response_data['access_token']
-    headers = {
-        'Authorization': 'Bearer {token}'.format(token=access_token)
-    }
-
-    r = requests.get(spotify_base.format(id=uri), headers=headers)
-    r = r.json()
-    # return song and artist name
-    return (r['name']+" "+r['artists'][0]['name'])
-
-
-# main request formatting and redirecting
-def request(query,lyrical_video):
-    link = ""
-    time = ""
-
-    if query.find("https://") != -1: # if request is a link
-
-        if query.find("youtube.com/watch") != -1 or query.find("youtu.be/") != -1: # if request is a youtube link get video ID from link
-            videoId = ''
-            if query.find("youtube.com/watch") != -1 and query.find("&ab_channel") != -1:
-                videoId = query[query.find("/watch?v=")+9:query.find("&ab_channel")]
-            elif query.find("youtube.com/watch") != -1:
-                videoId = query[query.find("/watch?v=")+9:]
-            elif query.find("youtu.be/") != -1 and query.find("?t=") !=-1:
-                videoId = query[query.find("youtu.be/")+9:query.find("?t=")]
-            elif query.find("youtu.be/") != -1:
-                videoId = query[query.find("youtu.be/")+9:]
-
-            # get video info from youtube
-            link, time = ytpull(videoId, is_youtube_id=True)
-
-
-    if query.find("spotify:track") !=-1: # if request is a spotify track link
-
-        uri = query[14:] # extract uri from link
-
-        name = spotifypull(uri) # get name of track from spotify api
-
-        if lyrical_video==True:
-            link, time = ytpull(name+" lyrics")
-        else:
-            link, time = ytpull(name)
-
-    elif query.find("spotify") !=-1: # if request is a spotify link
-
-        uri = query[31:53] # extract uri from link
-
-        name = spotifypull(uri) # get name of song from spotify API
-
-        if lyrical_video == True:
-            link, time = ytpull(name+" lyrics")
-        else:
-            link, time = ytpull(name)
-
-    else: # if request is a general query
-
-        if lyrical_video==True:
-            link, time = ytpull(query+" lyrics")
-        else:
-            link, time = ytpull(query)
-    return link, time
+    return (discord.FFmpegPCMAudio(filename, **ffmpeg_opts),data)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -276,17 +148,19 @@ async def fangs(ctx):
 # play song based on youtube or spotify links, or a general query
 @bot.hybrid_command(name='play', description = "Plays your song by name/YT/Spotify URL", pass_context=True)
 async def play(ctx, *, query):
-    
     url,time = request(query,False)
-
     # flag to check if bot is connected to a VC
     connect_flag = False
-    if ctx.voice_client is None:
-        if ctx.author.voice:
+    if ctx.voice_client is None: # if bot not in vc
+        if ctx.author.voice: # if author in vc then join authors
             await ctx.author.voice.channel.connect()
             connect_flag = True
         else:
             await ctx.send("Join a VC first!")
+    elif ctx.author.voice.channel() == ctx.voice_client.channel(): # if bot in same vc as author
+        connect_flag = True
+    else:
+        await ctx.send("Join the bot's VC!")
 
     if connect_flag:
         source = await audiostream(url, loop=bot.loop, stream=True)
@@ -305,13 +179,16 @@ async def play(ctx, *, query):
     url,time = request(query,True)
     # flag to check if bot is connected to a VC
     connect_flag = False
-
-    if ctx.bot_voice is None:
-        if ctx.author.voice:
+    if ctx.voice_client is None: # if bot not in vc
+        if ctx.author.voice: # if author in vc then join authors
             await ctx.author.voice.channel.connect()
             connect_flag = True
         else:
-            await ctx.send("Join a voice channel!")
+            await ctx.send("Join a VC first!")
+    elif ctx.author.voice.channel() == ctx.voice_client.channel(): # if bot in same vc as author
+        connect_flag = True
+    else:
+        await ctx.send("Join the bot's VC!")
 
     if connect_flag:
         source = await audiostream(url, loop=bot.loop, stream=True)
