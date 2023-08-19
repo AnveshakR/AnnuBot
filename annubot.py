@@ -6,6 +6,7 @@ import random
 import discord
 import asyncio
 from discord.ext import commands
+import queue
 
 #setup
 load_dotenv()
@@ -126,12 +127,16 @@ async def fangs(ctx):
     
     # flag to check if bot is connected to a VC
     connect_flag = False
-    if ctx.voice_client is None:
-        if ctx.author.voice:
+    if ctx.voice_client is None: # if bot not in vc
+        if ctx.author.voice: # if author in vc then join authors
             await ctx.author.voice.channel.connect()
             connect_flag = True
         else:
-            await ctx.send("Join a VC first")
+            await ctx.send("Join a VC first!")
+    elif ctx.author.voice.channel() == ctx.voice_client.channel(): # if bot in same vc as author
+        connect_flag = True
+    else:
+        await ctx.send("Join the bot's VC!")
 
     if connect_flag:
         seishin = "https://youtu.be/gBmxCcHtY2Y"
@@ -147,8 +152,13 @@ async def fangs(ctx):
     
 # play song based on youtube or spotify links, or a general query
 @bot.hybrid_command(name='play', description = "Plays your song by name/YT/Spotify URL", pass_context=True)
-async def play(ctx, *, query):
-    url,time = request(query,False)
+async def play(ctx, *, query=None):
+
+    if query is None or query.strip() == "":
+        return await ctx.send("No query given!")
+
+    loading_msg = await ctx.send("Loading...") # need to send a placeholder text else slash interaction times out
+    url,time = request(query, False)
     # flag to check if bot is connected to a VC
     connect_flag = False
     if ctx.voice_client is None: # if bot not in vc
@@ -156,11 +166,11 @@ async def play(ctx, *, query):
             await ctx.author.voice.channel.connect()
             connect_flag = True
         else:
-            await ctx.send("Join a VC first!")
-    elif ctx.author.voice.channel() == ctx.voice_client.channel(): # if bot in same vc as author
+            return await ctx.send("Join a VC first!")
+    elif ctx.author.voice.channel == ctx.voice_client.channel: # if bot in same vc as author
         connect_flag = True
     else:
-        await ctx.send("Join the bot's VC!")
+        return await ctx.send("Join the bot's VC!")
 
     if connect_flag:
         source = await audiostream(url, loop=bot.loop, stream=True)
@@ -170,13 +180,18 @@ async def play(ctx, *, query):
         ctx.voice_client.play(source[0], after=lambda e: print('Player error: %s' % e) if e else None)
         playerembed.set_image(url=data['thumbnail'])
         playerembed.description="[{}]({}) [{}]".format(title,ytbase+ytid,time)
-        await ctx.send(embed=playerembed)
+        await loading_msg.edit(content=None, embed=playerembed)
+    return
 
 # same as annu play, but searches for lyrical version
 @bot.hybrid_command(name='lplay',description = "Same as plays but searches for lyric version", pass_context=True)
-async def play(ctx, *, query):
+async def play(ctx, *, query=None):
 
-    url,time = request(query,True)
+    if query is None or query.strip() == "":
+        return await ctx.send("No query given!")
+
+    loading_msg = await ctx.send("Loading...") # need to send a placeholder text else slash interaction times out
+    url,time = request(query, True)
     # flag to check if bot is connected to a VC
     connect_flag = False
     if ctx.voice_client is None: # if bot not in vc
@@ -184,21 +199,22 @@ async def play(ctx, *, query):
             await ctx.author.voice.channel.connect()
             connect_flag = True
         else:
-            await ctx.send("Join a VC first!")
-    elif ctx.author.voice.channel() == ctx.voice_client.channel(): # if bot in same vc as author
+            return await ctx.send("Join a VC first!")
+    elif ctx.author.voice.channel == ctx.voice_client.channel: # if bot in same vc as author
         connect_flag = True
     else:
-        await ctx.send("Join the bot's VC!")
+        return await ctx.send("Join the bot's VC!")
 
     if connect_flag:
         source = await audiostream(url, loop=bot.loop, stream=True)
         data = source[1]
         title = data['title']
         ytid = data['id']
-        ctx.bot_voice.play(source[0], after=lambda e: print('Player error: %s' % e) if e else None)
+        ctx.voice_client.play(source[0], after=lambda e: print('Player error: %s' % e) if e else None)
         playerembed.set_image(url=data['thumbnail'])
         playerembed.description="[{}]({}) [{}]".format(title,ytbase+ytid,time)
-        await ctx.send(embed=playerembed)
+        await loading_msg.edit(content=None, embed=playerembed)
+    return
 
 # pauses music
 @bot.hybrid_command(name='pause', description = "Pauses playback")
