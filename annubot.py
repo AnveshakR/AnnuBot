@@ -144,7 +144,7 @@ async def fuckoff(ctx):
                 'Anu Malik fuck off nahi hota',
                 'Tere baap ka naukar hu kya',
                 'Tu fuckoff',
-                "Teri himmat kaise hui?"
+                "Teri himmat kaise hui?",
                 "Bhag yahaan se, chirkut.",
                 "Jaa na, bakwaas mat kar.",
                 "Aise kaise?",
