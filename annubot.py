@@ -1,3 +1,5 @@
+import string
+from tokenize import String
 import yt_dlp
 from utils import *
 from dotenv import load_dotenv
@@ -59,6 +61,32 @@ playerembed = discord.Embed(
     color = discord.Colour(0x7289DA)
 )
 
+class GuildQueue():
+    def __init__(self):
+        self.guild_queue = queue.Queue(-1)
+        self.guild_id = None
+
+    def is_queue_empty(self):
+        return self.guild_queue.empty()
+
+    def put_in_queue(self, song):
+        return self.guild_queue.put(song)
+
+    def get_latest_from_queue(self):
+        if not self.is_queue_empty():
+            return self.guild_queue.get()
+        else:
+            return None
+    
+    def display_queue(self):
+        if not self.is_queue_empty():
+            queue_text = ""
+            for num, elem in enumerate(list(self.guild_queue.queue)):
+                queue_text += str(num) + ") " + str(elem) + "\n"
+            return queue_text
+        else:
+            return None
+
 @bot.event
 async def on_ready():
     # Bot presence
@@ -112,7 +140,18 @@ async def dc(ctx):
 async def fuckoff(ctx):
 
     # dont tell anu malik to fuckoff
-    fuckoffs = ['Tu hota kaun hai','Anu Malik fuck off nahi hota','Tere baap ka naukar hu kya','Tu fuckoff']
+    fuckoffs = ['Tu hota kaun hai',
+                'Anu Malik fuck off nahi hota',
+                'Tere baap ka naukar hu kya',
+                'Tu fuckoff',
+                "Teri himmat kaise hui?"
+                "Bhag yahaan se, chirkut.",
+                "Jaa na, bakwaas mat kar.",
+                "Aise kaise?",
+                "Aukat mein reh.",
+                "Kya ukhaad lega tu?",
+                "Bhool ja, tere level ka nahi hai.",
+                "Chal nikal, time waste mat kar."]
     await ctx.send(random.choice(fuckoffs))
 
 @bot.hybrid_command(name = 'irshad',description = "Delivers a true-blue Anu Malik shayari", aliases=['sher'], pass_context=True)
@@ -166,18 +205,18 @@ async def play(ctx, *, query=None):
             await ctx.author.voice.channel.connect()
             connect_flag = True
         else:
-            return await ctx.send("Join a VC first!")
+            return await loading_msg.edit("Join a VC first!")
     elif ctx.author.voice.channel == ctx.voice_client.channel: # if bot in same vc as author
         connect_flag = True
     else:
-        return await ctx.send("Join the bot's VC!")
+        return await loading_msg.edit("Join the bot's VC!")
 
     if connect_flag:
         source = await audiostream(url, loop=bot.loop, stream=True)
         data = source[1]
         title = data['title']
         ytid = data['id']
-        ctx.voice_client.play(source[0], after=lambda e: print('Player error: %s' % e) if e else None)
+        ctx.voice_client.play(source[0], after=lambda e: print("'Player error: %s' % e") if e else print(ctx.guild.id))
         playerembed.set_image(url=data['thumbnail'])
         playerembed.description="[{}]({}) [{}]".format(title,ytbase+ytid,time)
         await loading_msg.edit(content=None, embed=playerembed)
@@ -199,11 +238,11 @@ async def play(ctx, *, query=None):
             await ctx.author.voice.channel.connect()
             connect_flag = True
         else:
-            return await ctx.send("Join a VC first!")
+            return await loading_msg.edit("Join a VC first!")
     elif ctx.author.voice.channel == ctx.voice_client.channel: # if bot in same vc as author
         connect_flag = True
     else:
-        return await ctx.send("Join the bot's VC!")
+        return await loading_msg.edit("Join the bot's VC!")
 
     if connect_flag:
         source = await audiostream(url, loop=bot.loop, stream=True)
