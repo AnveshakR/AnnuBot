@@ -61,10 +61,18 @@ playerembed = discord.Embed(
     color = discord.Colour(0x7289DA)
 )
 
-class GuildQueue():
-    def __init__(self):
+class GuildQueue:
+
+    instances = {}
+
+    def __init__(self, guild_id):
         self.guild_queue = queue.Queue(-1)
-        self.guild_id = None
+        self.guild_id = guild_id
+        GuildQueue.instances[guild_id] = self
+
+    @classmethod
+    def exists(cls, guild_id):
+        return guild_id in cls.instances
 
     def is_queue_empty(self):
         return self.guild_queue.empty()
@@ -94,28 +102,37 @@ async def on_ready():
     await bot.tree.sync()
 
 @bot.hybrid_command(name = 'join', description = "Joins your voice channel", aliases=['connect'], pass_context=True)
-async def join(ctx):
+async def join(ctx, bot_voice=None, loading_msg=None, called=False):
+
+    if loading_msg is None:
+        loading_msg = await ctx.send("Loading...")
 
     # getting bot's voice channel object
     bot_voice = discord.utils.get(bot.voice_clients, guild=ctx.guild)
 
     # if user not in VC
     if ctx.author.voice is None:
-        await ctx.send("You are not connected to a voice channel.")
-        raise commands.CommandError("Author not connected to a voice channel.")
+        await loading_msg.edit(content = "You are not connected to a voice channel.")
+        return False, "You are not connected to a voice channel."
     
     # if bot not in VC but author in VC
     elif bot_voice is None and ctx.author.voice:
-        await ctx.send(f"Joining {ctx.author.voice.channel}!")
+        await loading_msg.edit(content=f"Joining {ctx.author.voice.channel}!")
         await ctx.author.voice.channel.connect()
+        return True, "Success"
 
-    # if author and bot in same VC
-    elif ctx.author.voice.channel == bot_voice.channel:
-        await ctx.send("Already in your voice channel!")
+    # if author and bot in same VC but wasnt called by another function
+    elif ctx.author.voice.channel == bot_voice.channel and not called:
+        await loading_msg.edit(content = "Already in your voice channel!")
+        return True, "Success"
+    
+    elif ctx.author.voice.channel == bot_voice.channel and called:
+        return True, "Success"
 
     # if bot and author in different VCs
     elif ctx.author.voice.channel != bot_voice.channel and ctx.author.voice:
-        await ctx.send("Bot already in another voice channel!")
+        await loading_msg.edit(content = "Bot already in another voice channel!")
+        return False, "Bot already in another voice channel!"
 
 @bot.hybrid_command(name='disconnect', description = "Leaves your voice channel", aliases=['nikal','leave'])
 async def dc(ctx):
@@ -197,21 +214,25 @@ async def play(ctx, *, query=None):
         return await ctx.send("No query given!")
 
     loading_msg = await ctx.send("Loading...") # need to send a placeholder text else slash interaction times out
-    url,time = request(query, False)
-    # flag to check if bot is connected to a VC
-    connect_flag = False
-    if ctx.voice_client is None: # if bot not in vc
-        if ctx.author.voice: # if author in vc then join authors
-            await ctx.author.voice.channel.connect()
-            connect_flag = True
-        else:
-            return await loading_msg.edit("Join a VC first!")
-    elif ctx.author.voice.channel == ctx.voice_client.channel: # if bot in same vc as author
-        connect_flag = True
-    else:
-        return await loading_msg.edit("Join the bot's VC!")
+    bot_voice = discord.utils.get(bot.voice_clients, guild=ctx.guild)
+
+    connect_flag, message = await join(ctx, bot_voice=bot_voice, loading_msg=loading_msg, called=True)
 
     if connect_flag:
+
+        url,time = request(query, False)
+
+        Queue_Object = None
+
+        if not GuildQueue.exists(ctx.guild.id):
+            Queue_Object = GuildQueue(ctx.guild.id)
+        else:
+            Queue_Object = GuildQueue.instances[ctx.guild.id]
+        
+        Queue_Object.put_in_queue(query)
+        print(ctx.guild.id)
+        print(Queue_Object.display_queue())
+
         source = await audiostream(url, loop=bot.loop, stream=True)
         data = source[1]
         title = data['title']
@@ -220,6 +241,8 @@ async def play(ctx, *, query=None):
         playerembed.set_image(url=data['thumbnail'])
         playerembed.description="[{}]({}) [{}]".format(title,ytbase+ytid,time)
         await loading_msg.edit(content=None, embed=playerembed)
+    else:
+        await loading_msg.edit(message)
     return
 
 # same as annu play, but searches for lyrical version
