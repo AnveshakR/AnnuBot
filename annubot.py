@@ -94,7 +94,7 @@ class GuildQueue:
             return queue_text
         else:
             return None
-
+        
 @bot.event
 async def on_ready():
     # Bot presence
@@ -153,31 +153,106 @@ async def dc(ctx):
     else:
         await ctx.send("You cannot make the bot leave.")
 
-@bot.hybrid_command(name = 'fuckoff',description = "Try it ;)", aliases=['fuck off'], pass_context=True)
-async def fuckoff(ctx):
-
-    # dont tell anu malik to fuckoff
-    fuckoffs = ['Tu hota kaun hai',
-                'Anu Malik fuck off nahi hota',
-                'Tere baap ka naukar hu kya',
-                'Tu fuckoff',
-                "Teri himmat kaise hui?",
-                "Bhag yahaan se, chirkut.",
-                "Jaa na, bakwaas mat kar.",
-                "Aise kaise?",
-                "Aukat mein reh.",
-                "Kya ukhaad lega tu?",
-                "Bhool ja, tere level ka nahi hai.",
-                "Chal nikal, time waste mat kar."]
-    await ctx.send(random.choice(fuckoffs))
-
 @bot.hybrid_command(name = 'irshad',description = "Delivers a true-blue Anu Malik shayari", aliases=['sher'], pass_context=True)
 async def shayari(ctx):
 
     # random shayri
     await ctx.send('Annu says: {}'.format(random.choice(sher)))
-
     
+# play song based on youtube or spotify links, or a general query
+@bot.hybrid_command(name='play', description = "Plays your song by name/YT/Spotify URL", pass_context=True)
+async def play(ctx, *, query=None):
+
+    # errors if no query given
+    if query is None or query.strip() == "":
+        return await ctx.send("No query given!")
+
+    loading_msg = await ctx.send("Loading...") # need to send a placeholder text else slash interaction times out
+    bot_voice = discord.utils.get(bot.voice_clients, guild=ctx.guild)
+
+    connect_flag, message = await join(ctx, bot_voice=bot_voice, loading_msg=loading_msg, called=True)
+    # connects bot to vc if not there
+
+    if connect_flag:
+        # if connection succeeds then searches if the guild already has an active queue
+        if not GuildQueue.exists(ctx.guild.id):
+            # if not then creates a queue and registers it
+            Queue_Object = GuildQueue(ctx.guild.id)
+        else:
+            # if yes then initialise the variable to it
+            Queue_Object = GuildQueue.instances[ctx.guild.id]
+        
+        # if player is active then add query to queue
+        if not Queue_Object.is_queue_empty() or ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
+            Queue_Object.put_in_queue(query)
+            print(Queue_Object.display_queue())
+            return await loading_msg.edit(content = "Added to queue!")
+        # if it is the first song then play immediately
+        # NOTE: might have to change this to add to queue regardless to avoid conflicts if new song is added before first song starts playing
+        else:
+            await loading_msg.edit(content = "Now Playing!")
+            return await play_audio(ctx, query)
+    else:
+        # if connection fails then prints reason
+        await loading_msg.edit(message)
+    return
+
+async def play_audio(ctx, query):
+    # plays audio and sends the embed into chat
+    url,time = request(query)
+    source = await audiostream(url, loop=bot.loop, stream=True)
+    data = source[1]
+    title = data['title']
+    ytid = data['id']
+
+    def after_play(e):
+        if e:
+            print("'Player error: %s' % e")
+
+    ctx.voice_client.play(source[0], after=after_play)
+    playerembed.set_image(url=data['thumbnail'])
+    playerembed.description="[{}]({}) [{}]".format(title,ytbase+ytid,time)
+    await ctx.send(content=None, embed=playerembed)
+    await play_next_song(ctx)
+
+async def play_next_song(ctx):
+    # plays next song if available in that guild's queue
+    Queue_Object = GuildQueue.instances[ctx.guild.id]
+    while ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
+        # if a song is playing, sleeps asynchronously till it is finished
+        await asyncio.sleep(1)
+    if not Queue_Object.is_queue_empty():
+        # after sleep finishes, gets latest song from queue and plays
+        query = Queue_Object.get_latest_from_queue()
+        return await play_audio(ctx, query)
+    else:
+        # if end of queue is reached
+        await ctx.send("End of queue reached!")
+
+# pauses music
+@bot.hybrid_command(name='pause', description = "Pauses playback")
+async def pause(ctx):
+    if ctx.voice_client:
+        if ctx.voice_client.is_playing():
+            ctx.voice_client.pause()
+            ctx.send("Paused!")
+        else:
+            await ctx.send("Music already paused. Do you mean to resume?")
+    else:
+        await ctx.send("Nothing is playing.")
+
+# resumes music
+@bot.hybrid_command(name='resume', description = "Resumes playback")
+async def resume(ctx):
+    if ctx.voice_client:
+        if ctx.voice_client.is_paused():
+            ctx.voice_client.resume()
+            ctx.send("Resumed!")
+        else:
+            await ctx.send("Music already playing. Do you mean to pause?")
+    else:
+        await ctx.send("Nothing is playing.")
+
 @bot.hybrid_command(name = 'fangs', description = "Plays Sheishen by Keylo X FANGS", hidden=True)
 async def fangs(ctx):
     
@@ -205,101 +280,24 @@ async def fangs(ctx):
         playerembed.set_image(url=data['thumbnail'])
         playerembed.description="[{}]({}) [{}]".format(title,ytbase+ytid,time)
         await ctx.send(embed=playerembed)
-    
-# play song based on youtube or spotify links, or a general query
-@bot.hybrid_command(name='play', description = "Plays your song by name/YT/Spotify URL", pass_context=True)
-async def play(ctx, *, query=None):
 
-    if query is None or query.strip() == "":
-        return await ctx.send("No query given!")
 
-    loading_msg = await ctx.send("Loading...") # need to send a placeholder text else slash interaction times out
-    bot_voice = discord.utils.get(bot.voice_clients, guild=ctx.guild)
+@bot.hybrid_command(name = 'fuckoff',description = "Try it ;)", aliases=['fuck off'], pass_context=True)
+async def fuckoff(ctx):
 
-    connect_flag, message = await join(ctx, bot_voice=bot_voice, loading_msg=loading_msg, called=True)
-
-    if connect_flag:
-
-        url,time = request(query, False)
-
-        Queue_Object = None
-
-        if not GuildQueue.exists(ctx.guild.id):
-            Queue_Object = GuildQueue(ctx.guild.id)
-        else:
-            Queue_Object = GuildQueue.instances[ctx.guild.id]
-        
-        Queue_Object.put_in_queue(query)
-        print(ctx.guild.id)
-        print(Queue_Object.display_queue())
-
-        source = await audiostream(url, loop=bot.loop, stream=True)
-        data = source[1]
-        title = data['title']
-        ytid = data['id']
-        ctx.voice_client.play(source[0], after=lambda e: print("'Player error: %s' % e") if e else print(ctx.guild.id))
-        playerembed.set_image(url=data['thumbnail'])
-        playerembed.description="[{}]({}) [{}]".format(title,ytbase+ytid,time)
-        await loading_msg.edit(content=None, embed=playerembed)
-    else:
-        await loading_msg.edit(message)
-    return
-
-# same as annu play, but searches for lyrical version
-@bot.hybrid_command(name='lplay',description = "Same as plays but searches for lyric version", pass_context=True)
-async def play(ctx, *, query=None):
-
-    if query is None or query.strip() == "":
-        return await ctx.send("No query given!")
-
-    loading_msg = await ctx.send("Loading...") # need to send a placeholder text else slash interaction times out
-    url,time = request(query, True)
-    # flag to check if bot is connected to a VC
-    connect_flag = False
-    if ctx.voice_client is None: # if bot not in vc
-        if ctx.author.voice: # if author in vc then join authors
-            await ctx.author.voice.channel.connect()
-            connect_flag = True
-        else:
-            return await loading_msg.edit("Join a VC first!")
-    elif ctx.author.voice.channel == ctx.voice_client.channel: # if bot in same vc as author
-        connect_flag = True
-    else:
-        return await loading_msg.edit("Join the bot's VC!")
-
-    if connect_flag:
-        source = await audiostream(url, loop=bot.loop, stream=True)
-        data = source[1]
-        title = data['title']
-        ytid = data['id']
-        ctx.voice_client.play(source[0], after=lambda e: print('Player error: %s' % e) if e else None)
-        playerembed.set_image(url=data['thumbnail'])
-        playerembed.description="[{}]({}) [{}]".format(title,ytbase+ytid,time)
-        await loading_msg.edit(content=None, embed=playerembed)
-    return
-
-# pauses music
-@bot.hybrid_command(name='pause', description = "Pauses playback")
-async def pause(ctx):
-    if ctx.voice_client:
-        if ctx.voice_client.is_playing():
-            ctx.voice_client.pause()
-            ctx.send("Paused!")
-        else:
-            await ctx.send("Music already paused. Do you mean to resume?")
-    else:
-        await ctx.send("Nothing is playing.")
-
-# resumes music
-@bot.hybrid_command(name='resume', description = "Resumes playback")
-async def resume(ctx):
-    if ctx.voice_client:
-        if ctx.voice_client.is_paused():
-            ctx.voice_client.resume()
-            ctx.send("Resumed!")
-        else:
-            await ctx.send("Music already playing. Do you mean to pause?")
-    else:
-        await ctx.send("Nothing is playing.")
+    # dont tell anu malik to fuckoff
+    fuckoffs = ['Tu hota kaun hai',
+                'Anu Malik fuck off nahi hota',
+                'Tere baap ka naukar hu kya',
+                'Tu fuckoff',
+                "Teri himmat kaise hui?",
+                "Bhag yahaan se, chirkut.",
+                "Jaa na, bakwaas mat kar.",
+                "Aise kaise?",
+                "Aukat mein reh.",
+                "Kya ukhaad lega tu?",
+                "Bhool ja, tere level ka nahi hai.",
+                "Chal nikal, time waste mat kar."]
+    await ctx.send(random.choice(fuckoffs))
 
 bot.run(DISCORD_TOKEN)

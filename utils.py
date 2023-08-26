@@ -89,7 +89,7 @@ def spotifypull(uri):
 
 
 # main request formatting and redirecting
-def request(query,lyrical_video):
+def request(query):
     link = ""
     time = ""
 
@@ -116,10 +116,7 @@ def request(query,lyrical_video):
 
         name = spotifypull(uri) # get name of track from spotify api
 
-        if lyrical_video==True:
-            link, time = ytpull(name+" lyrics")
-        else:
-            link, time = ytpull(name)
+        link, time = ytpull(name+" audio")
 
     elif query.find("spotify") !=-1: # if request is a spotify link
 
@@ -127,15 +124,10 @@ def request(query,lyrical_video):
 
         name = spotifypull(uri) # get name of song from spotify API
 
-        if lyrical_video == True:
-            link, time = ytpull(name+" lyrics")
-        else:
-            link, time = ytpull(name)
+        link, time = ytpull(name+" audio")
 
     else: # if request is a general query
 
-        if lyrical_video==True:
-            link, time = ytpull(query+" lyrics")
-        else:
-            link, time = ytpull(query)
+        link, time = ytpull(query+" audio")
+
     return link, time
