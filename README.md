@@ -29,10 +29,10 @@ Prefix for this bot is **annu**
 annu play https://www.youtube.com/watch?v=dQw4w9WgXcQ
 
 ## Known Issues
-- Songs may stop 10-15s before the actual end
+- Songs may stop 10-15s before the actual end (SOLVED)
 
 ## To-do
-- [ ] Implement queue for songs
+- [x] Implement queue for songs
 
 ## Invite link
 Invite Annubot to your server with [this link](https://discord.com/api/oauth2/authorize?client_id=826187328774733844&permissions=281894054160&scope=bot).
