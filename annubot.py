@@ -88,10 +88,7 @@ class GuildQueue:
     
     def display_queue(self):
         if not self.is_queue_empty():
-            queue_text = ""
-            for num, elem in enumerate(list(self.guild_queue.queue)):
-                queue_text += str(num) + ") " + str(elem) + "\n"
-            return queue_text
+            return list(self.guild_queue.queue)
         else:
             return None
         
@@ -102,7 +99,7 @@ async def on_ready():
     await bot.tree.sync()
 
 @bot.hybrid_command(name = 'join', description = "Joins your voice channel", aliases=['connect'], pass_context=True)
-async def join(ctx, bot_voice=None, loading_msg=None, called=False):
+async def join(ctx:commands.Context, bot_voice=None, loading_msg=None, called=False):
 
     if loading_msg is None:
         loading_msg = await ctx.send("Loading...")
@@ -135,7 +132,7 @@ async def join(ctx, bot_voice=None, loading_msg=None, called=False):
         return False, "Bot already in another voice channel!"
 
 @bot.hybrid_command(name='disconnect', description = "Leaves your voice channel", aliases=['nikal','leave'])
-async def dc(ctx):
+async def dc(ctx:commands.Context):
 
     # getting bot's voice channel object
     bot_voice = discord.utils.get(bot.voice_clients, guild=ctx.guild)
@@ -154,14 +151,14 @@ async def dc(ctx):
         await ctx.send("You cannot make the bot leave.")
 
 @bot.hybrid_command(name = 'irshad',description = "Delivers a true-blue Anu Malik shayari", aliases=['sher'], pass_context=True)
-async def shayari(ctx):
+async def shayari(ctx:commands.Context):
 
     # random shayri
     await ctx.send('Annu says: {}'.format(random.choice(sher)))
     
 # play song based on youtube or spotify links, or a general query
 @bot.hybrid_command(name='play', description = "Plays your song by name/YT/Spotify URL", pass_context=True)
-async def play(ctx, *, query=None):
+async def play(ctx:commands.Context, *, query=None):
 
     # errors if no query given
     if query is None or query.strip() == "":
@@ -185,8 +182,7 @@ async def play(ctx, *, query=None):
         # if player is active then add query to queue
         if not Queue_Object.is_queue_empty() or ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
             Queue_Object.put_in_queue(query)
-            print(Queue_Object.display_queue())
-            return await loading_msg.edit(content = "Added to queue!")
+            return await loading_msg.edit(content="Added to queue!")
         # if it is the first song then play immediately
         # NOTE: might have to change this to add to queue regardless to avoid conflicts if new song is added before first song starts playing
         else:
@@ -194,10 +190,10 @@ async def play(ctx, *, query=None):
             return await play_audio(ctx, query)
     else:
         # if connection fails then prints reason
-        await loading_msg.edit(message)
+        await loading_msg.edit(content=message)
     return
 
-async def play_audio(ctx, query):
+async def play_audio(ctx:commands.Context, query):
     # plays audio and sends the embed into chat
     url,time = request(query)
     source = await audiostream(url, loop=bot.loop, stream=True)
@@ -215,7 +211,7 @@ async def play_audio(ctx, query):
     await ctx.send(content=None, embed=playerembed)
     await play_next_song(ctx)
 
-async def play_next_song(ctx):
+async def play_next_song(ctx:commands.Context):
     # plays next song if available in that guild's queue
     Queue_Object = GuildQueue.instances[ctx.guild.id]
     while ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
@@ -230,31 +226,64 @@ async def play_next_song(ctx):
         await ctx.send("End of queue reached!")
 
 # pauses music
-@bot.hybrid_command(name='pause', description = "Pauses playback")
-async def pause(ctx):
+@bot.hybrid_command(name='pause', description = "Pauses playback", aliases=['ruk'], pass_context=True)
+async def pause(ctx:commands.Context):
     if ctx.voice_client:
         if ctx.voice_client.is_playing():
             ctx.voice_client.pause()
-            ctx.send("Paused!")
+            await ctx.send("Paused!")
         else:
             await ctx.send("Music already paused. Do you mean to resume?")
     else:
         await ctx.send("Nothing is playing.")
 
 # resumes music
-@bot.hybrid_command(name='resume', description = "Resumes playback")
-async def resume(ctx):
+@bot.hybrid_command(name='resume', description = "Resumes playback",aliases=['chal'], pass_context=True)
+async def resume(ctx:commands.Context):
     if ctx.voice_client:
         if ctx.voice_client.is_paused():
             ctx.voice_client.resume()
-            ctx.send("Resumed!")
+            await ctx.send("Resumed!")
         else:
             await ctx.send("Music already playing. Do you mean to pause?")
     else:
         await ctx.send("Nothing is playing.")
 
+# skips current song
+@bot.hybrid_command(name='skip', description = "Skips to next song", aliases=['next', 'agla'], pass_context=True)
+async def skip(ctx:commands.Context):
+    if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
+        # skips if there is a song active on the bot
+        ctx.voice_client.stop()
+    else:
+        return await ctx.send("No song playing.")
+    
+    if not GuildQueue.exists(ctx.guild.id):
+        # if no more songs left in queue
+        return await ctx.send("Reached end of queue.")
+    else:
+        return await play_next_song(ctx)
+
+# displays queue
+@bot.hybrid_command(name='queue', description = "Displays song queue", pass_context=True)
+async def display_queue(ctx:commands.Context):
+    # checks if the guild already has an active queue
+    if not GuildQueue.exists(ctx.guild.id):
+        return await ctx.send("No songs in queue.")
+    else:
+        # if yes then initialise the variable to it
+        Queue_Object = GuildQueue.instances[ctx.guild.id]
+        queuelist = Queue_Object.display_queue()
+        if queuelist is None:
+            return await ctx.send("No songs in queue.")
+    
+    queuetext = ""
+    for num, song in enumerate(queuelist):
+        queuetext += f"{num+1}) {song}\n"
+    return await ctx.send(queuetext)
+
 @bot.hybrid_command(name = 'fangs', description = "Plays Sheishen by Keylo X FANGS", hidden=True)
-async def fangs(ctx):
+async def fangs(ctx:commands.Context):
     
     # flag to check if bot is connected to a VC
     connect_flag = False
@@ -283,7 +312,7 @@ async def fangs(ctx):
 
 
 @bot.hybrid_command(name = 'fuckoff',description = "Try it ;)", aliases=['fuck off'], pass_context=True)
-async def fuckoff(ctx):
+async def fuckoff(ctx:commands.Context):
 
     # dont tell anu malik to fuckoff
     fuckoffs = ['Tu hota kaun hai',

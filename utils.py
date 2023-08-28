@@ -116,7 +116,7 @@ def request(query):
 
         name = spotifypull(uri) # get name of track from spotify api
 
-        link, time = ytpull(name+" audio")
+        link, time = ytpull(name+" explicit audio")
 
     elif query.find("spotify") !=-1: # if request is a spotify link
 
@@ -124,10 +124,10 @@ def request(query):
 
         name = spotifypull(uri) # get name of song from spotify API
 
-        link, time = ytpull(name+" audio")
+        link, time = ytpull(name+" explicit audio")
 
     else: # if request is a general query
 
-        link, time = ytpull(query+" audio")
+        link, time = ytpull(query+" explicit audio")
 
     return link, time
