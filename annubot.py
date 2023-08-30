@@ -45,7 +45,10 @@ ytdl = yt_dlp.YoutubeDL(yt_dlp_opts)
 # audio driver
 async def audiostream(url,*,loop=None, stream=True):
     loop = loop or asyncio.get_event_loop()
-    data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
+    try:
+        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
+    except:
+        return None
     if 'entries' in data:
         data = data['entries'][0]
     filename = data['url'] if stream else ytdl.prepare_filename(data)
@@ -179,24 +182,29 @@ async def play(ctx:commands.Context, *, query=None):
             # if yes then initialise the variable to it
             Queue_Object = GuildQueue.instances[ctx.guild.id]
         
-        # if player is active then add query to queue
-        if not Queue_Object.is_queue_empty() or ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
-            Queue_Object.put_in_queue(query)
-            return await loading_msg.edit(content="Added to queue!")
-        # if it is the first song then play immediately
-        # NOTE: might have to change this to add to queue regardless to avoid conflicts if new song is added before first song starts playing
-        else:
-            await loading_msg.edit(content = "Now Playing!")
-            return await play_audio(ctx, query)
+        items, is_video_id = request(query)
+        for item in items:
+            Queue_Object.put_in_queue((item, is_video_id))
+        await loading_msg.edit(content="Added to queue, now playing!")
+        if not ctx.voice_client.is_playing() or not ctx.voice_client.is_paused():
+            await play_next_song(ctx)
+
     else:
         # if connection fails then prints reason
         await loading_msg.edit(content=message)
     return
 
-async def play_audio(ctx:commands.Context, query):
+async def play_audio(ctx:commands.Context, query, is_video_id):
     # plays audio and sends the embed into chat
-    url,time = request(query)
+    url,time = ytpull(query, is_video_id)
+    if url==None:
+        await ctx.send(f"{ytvideolistnames([query])[0] if is_video_id else query} not found, skipping to next song")
+        return await play_next_song(ctx)
+
     source = await audiostream(url, loop=bot.loop, stream=True)
+    if source is None:
+        await ctx.send(f"{ytvideolistnames([query])[0] if is_video_id else query} not found, skipping to next song")
+        return await play_next_song(ctx)
     data = source[1]
     title = data['title']
     ytid = data['id']
@@ -219,8 +227,8 @@ async def play_next_song(ctx:commands.Context):
         await asyncio.sleep(1)
     if not Queue_Object.is_queue_empty():
         # after sleep finishes, gets latest song from queue and plays
-        query = Queue_Object.get_latest_from_queue()
-        return await play_audio(ctx, query)
+        query, is_video_id = Queue_Object.get_latest_from_queue()
+        return await play_audio(ctx, query, is_video_id)
     else:
         # if end of queue is reached
         await ctx.send("End of queue reached!")
@@ -276,11 +284,42 @@ async def display_queue(ctx:commands.Context):
         queuelist = Queue_Object.display_queue()
         if queuelist is None:
             return await ctx.send("No songs in queue.")
-    
-    queuetext = ""
-    for num, song in enumerate(queuelist):
-        queuetext += f"{num+1}) {song}\n"
-    return await ctx.send(queuetext)
+
+    # gets the values which are YT links
+    true_tuples = [t for t in queuelist if t[1]]
+
+    # Extract video_ids from corresponding values
+    values_to_process = [t[0] for t in true_tuples]
+
+    # gets names of the videos with given video ids
+    processed_values = ytvideolistnames(values_to_process)
+
+    queuearray = []
+    queueelem = ""
+    # Iterate through the original queue
+    for num, item in enumerate(queuelist):
+        temp_name = ""
+        # if the value is a YT link, get the value from the names list
+        if item[1]:
+            processed_value = processed_values.pop(0)
+            temp_name = processed_value
+        # else just append the value as it is
+        else:
+            temp_name = item[0]
+        
+        # discord has a message character limit of 2000 character, so we separate them by length
+        if len(queueelem) + len(f"{num+1}) {temp_name}\n") <= 2000:
+            queueelem += f"{num+1}) {temp_name}\n"
+        else:
+            queuearray.append(queueelem)
+            queueelem = ""
+    if queueelem != "":
+        queuearray.append(queueelem)
+
+    for i in queuearray:
+        await(ctx.send(i))
+
+    return
 
 @bot.hybrid_command(name = 'fangs', description = "Plays Sheishen by Keylo X FANGS", hidden=True)
 async def fangs(ctx:commands.Context):

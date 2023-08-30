@@ -4,3 +4,4 @@ annu-env/
 .python-version
 .vscode/
 __pycache__/
+*.ipynb

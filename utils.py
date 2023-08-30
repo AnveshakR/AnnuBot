@@ -1,6 +1,9 @@
 import requests
 import os
 from dotenv import load_dotenv
+import re
+from urllib.parse import urlparse, parse_qs
+import logging
 
 load_dotenv()
 
@@ -10,66 +13,39 @@ SPOTIFY_SECRET = os.getenv('SPOTIFY_SECRET')
 
 auth_url = 'https://accounts.spotify.com/api/token'
 ytbase = "https://www.youtube.com/watch?v="
-spotify_base = 'https://api.spotify.com/v1/tracks/{id}'
+spotify_base = 'https://api.spotify.com/v1/{link_type}/{id}'
+
+def ytvideolistnames(video_ids) -> list:
+    query = '&id='+'&id='.join(video_ids)
+    r = requests.get(f"https://youtube.googleapis.com/youtube/v3/videos?part=snippet{query}&key={YT_KEY}").json()
+    names = []
+    for item in r['items']:
+        names.append(item['snippet']['title'])
+    return names
 
 # get video info from YouTube API
-def ytpull(query, is_youtube_id=False):
-
+def ytpull(query, is_video_id=False):
     # search for song by song ID if query is not a valid youtube ID
-    if not is_youtube_id:
+    if not is_video_id:
+        # get video info for first search result
         get_video_id = requests.get('https://youtube.googleapis.com/youtube/v3/search?q={}&key={}'.format(query,YT_KEY))
-        query = get_video_id.json()['items'][0]['id']['videoId'] # change query to youtube ID
+        try:
+            query = get_video_id.json()['items'][0]['id']['videoId'] # change query to youtube ID
+        except:
+            return None, None
 
-    # get video info for first search result
+    # get video info from video_id
     get_video_details = requests.get('https://youtube.googleapis.com/youtube/v3/videos?part=contentDetails&id={}&key={}'.format(query, YT_KEY))
     video_data = get_video_details.json()
 
     link = ytbase + video_data['items'][0]['id'] # video link
     video_length = video_data['items'][0]['contentDetails']['duration'][2:] # playtime
-    time = ''
-    hour = False
-    minute = False
-
-    # length string formatting
-    if(video_length.find('H') != -1 and video_length != ""):
-        hours = video_length[:video_length.find('H')]
-        if len(hours) == 1:
-            hours = '0' + hours
-        time = time + hours + ':'
-        video_length = video_length[video_length.find('H')+1:]
-        hour = True
-
-
-    if(video_length.find('M') != -1 and video_length != ""):
-        minutes = video_length[:video_length.find('M')]
-        if len(minutes) == 1:
-            minutes = '0' + minutes
-        time = time + minutes + ':'
-        video_length = video_length[video_length.find('M')+1:]
-        minute = True
-
-    elif(hour==True):
-        time = time + "00:"
-
-
-    if(video_length.find('S') != -1 and video_length != ""):
-        seconds = video_length[:video_length.find('S')]
-        if len(seconds) == 1:
-            seconds = '0' + seconds
-        time = time + seconds
-    elif(hour==True and minute==False):
-        time = time + "00"
-    else:
-        time = time + "00"
-
-    if(hour==False and minute==False):
-        time = ":" + time
-
-    return(link, time)
+    time = re.sub(r'(\d+)([A-Za-z]*)', r'\1:', video_length).rstrip(':') # formatted playtime
+    return link, time
 
 
 # get song name from spotify URI using spotify API
-def spotifypull(uri):
+def spotifypull(uri, link_type) -> list:
     auth_response = requests.post(auth_url, {
     'grant_type': 'client_credentials',
     'client_id': SPOTIFY_ID,
@@ -81,53 +57,86 @@ def spotifypull(uri):
     headers = {
         'Authorization': 'Bearer {token}'.format(token=access_token)
     }
-
-    r = requests.get(spotify_base.format(id=uri), headers=headers)
+    # gets response based on type of spotify link
+    r = requests.get(spotify_base.format(link_type=link_type, id=uri), headers=headers)
     r = r.json()
-    # return song and artist name
-    return (r['name']+" "+r['artists'][0]['name'])
+    # return song based on link type
+    song_names = []
 
+    if link_type == 'tracks':
+        artist_names = ', '.join(artist['name'] for artist in r['artists'])
+        song_names.append(f"{r['name']} by {artist_names}")
+    elif link_type == 'playlists':
+        for i in r['tracks']['items']:
+            artist_names = ', '.join(artist['name'] for artist in i['track']['artists'])
+            song_names.append(f"{i['track']['name']} by {artist_names}")
+    elif link_type == 'albums':
+        for i in r['tracks']['items']:
+            artist_names = ', '.join(artist['name'] for artist in i['artists'])
+            song_names.append(f"{i['name']} by {artist_names}")
 
-# main request formatting and redirecting
-def request(query):
-    link = ""
-    time = ""
+    return song_names
 
-    if query.find("https://") != -1: # if request is a link
+# checks if link is a youtube link
+def is_youtube_link(query) -> bool:
+    parsed_url = urlparse(query)
+    return parsed_url.netloc == 'www.youtube.com' or parsed_url.netloc == 'youtube.com'
 
-        if query.find("youtube.com/watch") != -1 or query.find("youtu.be/") != -1: # if request is a youtube link get video ID from link
-            videoId = ''
-            if query.find("youtube.com/watch") != -1 and query.find("&ab_channel") != -1:
-                videoId = query[query.find("/watch?v=")+9:query.find("&ab_channel")]
-            elif query.find("youtube.com/watch") != -1:
-                videoId = query[query.find("/watch?v=")+9:]
-            elif query.find("youtu.be/") != -1 and query.find("?t=") !=-1:
-                videoId = query[query.find("youtu.be/")+9:query.find("?t=")]
-            elif query.find("youtu.be/") != -1:
-                videoId = query[query.find("youtu.be/")+9:]
+# checks if link is a spotify link
+def is_spotify_link(query) -> bool:
+    parsed_url = urlparse(query)
+    return parsed_url.netloc == 'open.spotify.com' or parsed_url.netloc == 'spotify'
 
-            # get video info from youtube
-            link, time = ytpull(videoId, is_youtube_id=True)
+# takes a query and returns the video id(for YT links) or names to be searched in youtube(non-YT links) as an array,
+# and a boolean that signifies if the query was a YT link or not
+def request(query) -> (list,bool):
 
+    if is_youtube_link(query): # if request is a youtube link
+        video_id = None
+        playlist_id = None
 
-    if query.find("spotify:track") !=-1: # if request is a spotify track link
+        # Extract video_id and playlist_id based on different URL types
+        if "start_radio" in query:
+            playlist_id = query.split("list=")[-1].split("&")[0]
+        elif "index" in query and "pp" in query:
+            video_id = query.split("v=")[-1].split("&")[0]
+        elif "pp=" in query:
+            video_id = query.split("v=")[-1].split("&")[0]
+        elif "list=" in query:
+            playlist_id = query.split("list=")[-1].split("&")[0]
+        
+        video_links = []
+        # get items in playlist
+        if playlist_id is not None:
+            r = requests.get(f"https://youtube.googleapis.com/youtube/v3/playlistItems?part=content_details&maxResults=50&playlistId={playlist_id}&key={YT_KEY}").json()
+            for items in r['items']:
+                video_links.append(items['contentDetails']['videoId'])
+        elif video_id is not None:
+            video_links.append(video_id)
 
-        uri = query[14:] # extract uri from link
+        return video_links, True
 
-        name = spotifypull(uri) # get name of track from spotify api
+    elif is_spotify_link(query): # if request is a spotify link
+        patterns = [
+        (r'^https://open\.spotify\.com/track/([a-zA-Z0-9]+)', 'tracks'),
+        (r'^https://open\.spotify\.com/album/([a-zA-Z0-9]+)', 'albums'),
+        (r'^https://open\.spotify\.com/playlist/([a-zA-Z0-9]+)', 'playlists'),
+        (r'^spotify:track:([a-zA-Z0-9]+)', 'tracks'),
+        (r'^spotify:album:([a-zA-Z0-9]+)', 'albums'),
+        (r'^spotify:playlist:([a-zA-Z0-9]+)', 'playlists')
+        ]
+        uri = None
+        # finds type of spotify link (track, album or playlist)
+        for pattern, link_type in patterns:
+            match = re.match(pattern, query)
+            if match:
+                uri = match.group(1)
+                break
+        
+        names = spotifypull(uri, link_type) # get names from spotify api
 
-        link, time = ytpull(name+" explicit audio")
-
-    elif query.find("spotify") !=-1: # if request is a spotify link
-
-        uri = query[31:53] # extract uri from link
-
-        name = spotifypull(uri) # get name of song from spotify API
-
-        link, time = ytpull(name+" explicit audio")
+        return names, False
 
     else: # if request is a general query
-
-        link, time = ytpull(query+" explicit audio")
-
-    return link, time
+        logging.info("General Query found")
+        return [query], False
