@@ -28,7 +28,7 @@ def ytpull(query, is_video_id=False):
     # search for song by song ID if query is not a valid youtube ID
     if not is_video_id:
         # get video info for first search result
-        get_video_id = requests.get('https://youtube.googleapis.com/youtube/v3/search?q={}&key={}'.format(query,YT_KEY))
+        get_video_id = requests.get('https://youtube.googleapis.com/youtube/v3/search?q={}&key={}'.format(query+" explicit audio",YT_KEY))
         try:
             query = get_video_id.json()['items'][0]['id']['videoId'] # change query to youtube ID
         except:

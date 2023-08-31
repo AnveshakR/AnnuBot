@@ -277,9 +277,10 @@ async def skip(ctx:commands.Context, *, query):
     else:
         # if query is a number then try skipping to that song
         if query.isdigit():
+            query = int(query)
             Queue_Object = GuildQueue.instances[ctx.guild.id]
             # if given index is larger then length of queue then its invalid
-            if int(query) > len(Queue_Object.display_queue()):
+            if query > len(Queue_Object.display_queue()):
                 return await ctx.send("Invalid queue index.")
             
             # remove all songs before that index
