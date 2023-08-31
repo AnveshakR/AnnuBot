@@ -57,7 +57,7 @@ async def audiostream(url,*,loop=None, stream=True):
 intents = discord.Intents.default()
 intents.message_content = True
 
-bot = commands.Bot(command_prefix='annu ', intents=intents)
+bot = commands.Bot(command_prefix='annu ', intents=intents, help_command=None)
 
 playerembed = discord.Embed(
     title = "Now Playing",
@@ -160,7 +160,7 @@ async def shayari(ctx:commands.Context):
     await ctx.send('Annu says: {}'.format(random.choice(sher)))
     
 # play song based on youtube or spotify links, or a general query
-@bot.hybrid_command(name='play', description = "Plays your song by name/YT/Spotify URL", pass_context=True)
+@bot.hybrid_command(name='play', description = "Plays your song by name/YT/Spotify URL", aliases=['baja'], pass_context=True)
 async def play(ctx:commands.Context, *, query=None):
 
     # errors if no query given
@@ -350,7 +350,7 @@ async def fangs(ctx:commands.Context):
         await ctx.send(embed=playerembed)
 
 
-@bot.hybrid_command(name = 'fuckoff',description = "Try it ;)", aliases=['fuck off'], pass_context=True)
+@bot.hybrid_command(name = 'fuckoff',description = "Try it ;)", pass_context=True)
 async def fuckoff(ctx:commands.Context):
 
     # dont tell anu malik to fuckoff
@@ -367,5 +367,25 @@ async def fuckoff(ctx:commands.Context):
                 "Bhool ja, tere level ka nahi hai.",
                 "Chal nikal, time waste mat kar."]
     await ctx.send(random.choice(fuckoffs))
+
+@bot.hybrid_command(name = "help", description = "Shows help message", pass_context = True)
+async def help(ctx:commands.Context):
+    helpembed = discord.Embed()
+    helpembed.set_thumbnail(url=bot.user.avatar)
+    helpembed.title = "Annu Commands"
+    helpembed.color = discord.Colour(0x7289DA)
+    helpembed.description = (
+    "`play [baja]:`Plays song/playlist/album from YT and Spotify\n"
+    "`irshad [sher]:` Get an authentic Annu Malik shayari!\n"
+    "`queue:` Shows the current queue\n"
+    "`skip [next, agla]:` Goes to next song if available\n"
+    "`join [connect]:` Connects to your voice channel\n"
+    "`pause [ruk]:` Pauses playback\n"
+    "`resume [chal]:` Resumes playback\n"
+    "`disconnect [nikal, leave]:` Disconnect from voice channel\n"
+    "`fuckoff:` Don't do this.\n"
+    "`help:` Shows this message"
+)
+    await ctx.send(embed=helpembed)
 
 bot.run(DISCORD_TOKEN)
