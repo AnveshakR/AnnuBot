@@ -259,7 +259,12 @@ async def resume(ctx:commands.Context):
 
 # skips current song
 @bot.hybrid_command(name='skip', description = "Skips to next song", aliases=['next', 'agla'], pass_context=True)
-async def skip(ctx:commands.Context):
+async def skip(ctx:commands.Context, *, query):
+
+    bot_voice = discord.utils.get(bot.voice_clients, guild=ctx.guild)
+    if ctx.author.voice is None or ctx.author.voice.channel != bot_voice.channel:
+        return await ctx.send("Join the bot's VC")
+
     if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
         # skips if there is a song active on the bot
         ctx.voice_client.stop()
@@ -270,7 +275,23 @@ async def skip(ctx:commands.Context):
         # if no more songs left in queue
         return await ctx.send("Reached end of queue.")
     else:
-        return await play_next_song(ctx)
+        # if query is a number then try skipping to that song
+        if query.isdigit():
+            Queue_Object = GuildQueue.instances[ctx.guild.id]
+            # if given index is larger then length of queue then its invalid
+            if int(query) > len(Queue_Object.display_queue()):
+                return await ctx.send("Invalid queue index.")
+            
+            # remove all songs before that index
+            for _ in range(query-1):
+                temp = Queue_Object.get_latest_from_queue()
+            
+            # next song will be required song
+            return await play_next_song(ctx)
+        
+        # else play the next song
+        else:
+            return await play_next_song(ctx)
 
 # displays queue
 @bot.hybrid_command(name='queue', description = "Displays song queue", pass_context=True)
@@ -378,7 +399,7 @@ async def help(ctx:commands.Context):
     "`play [baja]:`Plays song/playlist/album from YT and Spotify\n"
     "`irshad [sher]:` Get an authentic Annu Malik shayari!\n"
     "`queue:` Shows the current queue\n"
-    "`skip [next, agla]:` Goes to next song if available\n"
+    "`skip [next, agla] <number>:` Goes to next song or to the index specified\n"
     "`join [connect]:` Connects to your voice channel\n"
     "`pause [ruk]:` Pauses playback\n"
     "`resume [chal]:` Resumes playback\n"
