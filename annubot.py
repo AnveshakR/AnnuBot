@@ -160,38 +160,39 @@ async def shayari(ctx:commands.Context):
     await ctx.send('Annu says: {}'.format(random.choice(sher)))
     
 # play song based on youtube or spotify links, or a general query
-@bot.hybrid_command(name='play', description = "Plays your song by name/YT/Spotify URL", aliases=['baja'], pass_context=True)
+@bot.hybrid_command(name='play', description = "Plays your song by name/YT/Spotify URL or resumes playing from queue if no query given", aliases=['baja'], pass_context=True)
 async def play(ctx:commands.Context, *, query=None):
-
-    # errors if no query given
-    if query is None or query.strip() == "":
-        return await ctx.send("No query given!")
 
     loading_msg = await ctx.send("Loading...") # need to send a placeholder text else slash interaction times out
     bot_voice = discord.utils.get(bot.voice_clients, guild=ctx.guild)
 
     connect_flag, message = await join(ctx, bot_voice=bot_voice, loading_msg=loading_msg, called=True)
     # connects bot to vc if not there
-
     if connect_flag:
         # if connection succeeds then searches if the guild already has an active queue
         if not GuildQueue.exists(ctx.guild.id):
             # if not then creates a queue and registers it
             Queue_Object = GuildQueue(ctx.guild.id)
+            # if there is nothing in queue and play command is given without query then error out
+            if query is None or query.strip() == "":
+                return await ctx.send("No query given!")
         else:
             # if yes then initialise the variable to it
             Queue_Object = GuildQueue.instances[ctx.guild.id]
+            # if there is a queue and play is given without any query then continue playing from queue
+            if query is None or query.strip() == "":
+                return await play_next_song(ctx)
         
         items, is_video_id = request(query)
         for item in items:
             Queue_Object.put_in_queue((item, is_video_id))
         await loading_msg.edit(content="Added to queue, now playing!")
         if not ctx.voice_client.is_playing() or not ctx.voice_client.is_paused():
-            await play_next_song(ctx)
+            return await play_next_song(ctx)
 
     else:
         # if connection fails then prints reason
-        await loading_msg.edit(content=message)
+        return await loading_msg.edit(content=message)
     return
 
 async def play_audio(ctx:commands.Context, query, is_video_id):
@@ -217,7 +218,7 @@ async def play_audio(ctx:commands.Context, query, is_video_id):
     playerembed.set_image(url=data['thumbnail'])
     playerembed.description="[{}]({}) [{}]".format(title,ytbase+ytid,time)
     await ctx.send(content=None, embed=playerembed)
-    await play_next_song(ctx)
+    return await play_next_song(ctx)
 
 async def play_next_song(ctx:commands.Context):
     # plays next song if available in that guild's queue
@@ -255,11 +256,14 @@ async def resume(ctx:commands.Context):
         else:
             await ctx.send("Music already playing. Do you mean to pause?")
     else:
-        await ctx.send("Nothing is playing.")
+        await ctx.send("Nothing is playing. If you want to restart existing queue type just annu play")
+
+# NOTE: skip skips one song extra for some reason, most probably a time race between play_audio awaiting play_next_song at the end and the 
+# check if the song is playing in play_next_song
 
 # skips current song
 @bot.hybrid_command(name='skip', description = "Skips to next song", aliases=['next', 'agla'], pass_context=True)
-async def skip(ctx:commands.Context, *, query):
+async def skip(ctx:commands.Context, *, query=""):
 
     bot_voice = discord.utils.get(bot.voice_clients, guild=ctx.guild)
     if ctx.author.voice is None or ctx.author.voice.channel != bot_voice.channel:
@@ -271,28 +275,30 @@ async def skip(ctx:commands.Context, *, query):
     else:
         return await ctx.send("No song playing.")
     
-    if not GuildQueue.exists(ctx.guild.id):
-        # if no more songs left in queue
-        return await ctx.send("Reached end of queue.")
-    else:
-        # if query is a number then try skipping to that song
-        if query.isdigit():
-            query = int(query)
-            Queue_Object = GuildQueue.instances[ctx.guild.id]
-            # if given index is larger then length of queue then its invalid
-            if query > len(Queue_Object.display_queue()):
-                return await ctx.send("Invalid queue index.")
-            
-            # remove all songs before that index
-            for _ in range(query-1):
-                temp = Queue_Object.get_latest_from_queue()
-            
-            # next song will be required song
-            return await play_next_song(ctx)
+    # if query is a number then try skipping to that song
+    if query.isdigit():
+        query = int(query)
+
+        if not GuildQueue.exists(ctx.guild.id):
+            # if no more songs left in queue
+            return await ctx.send("Reached end of queue.")
         
-        # else play the next song
-        else:
-            return await play_next_song(ctx)
+        Queue_Object = GuildQueue.instances[ctx.guild.id]
+        # if given index is larger then length of queue then its invalid
+        if query > len(Queue_Object.display_queue()):
+            return await ctx.send("Invalid queue index.")
+        
+        # remove all songs before that index
+        for _ in range(query-1):
+            temp = Queue_Object.get_latest_from_queue()
+        
+        # next song will be required song
+        return await play_next_song(ctx)
+    
+    # else play the next song
+    else:
+        print("normal skip")
+        return await play_next_song(ctx)
 
 # displays queue
 @bot.hybrid_command(name='queue', description = "Displays song queue", pass_context=True)
