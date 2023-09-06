@@ -80,7 +80,7 @@ def spotifypull(uri, link_type) -> list:
 # checks if link is a youtube link
 def is_youtube_link(query) -> bool:
     parsed_url = urlparse(query)
-    return parsed_url.netloc == 'www.youtube.com' or parsed_url.netloc == 'youtube.com'
+    return parsed_url.netloc == 'www.youtube.com' or parsed_url.netloc == 'youtube.com' or parsed_url.netloc == 'youtu.be'
 
 # checks if link is a spotify link
 def is_spotify_link(query) -> bool:
@@ -96,7 +96,9 @@ def request(query) -> (list,bool):
         playlist_id = None
 
         # Extract video_id and playlist_id based on different URL types
-        if "start_radio" in query:
+        if "youtu.be" in query:
+            video_id = re.search("youtu\.be/([^\?&]+)?", query)[1]
+        elif "start_radio" in query:
             playlist_id = query.split("list=")[-1].split("&")[0]
         elif "index" in query and "pp" in query:
             video_id = query.split("v=")[-1].split("&")[0]
