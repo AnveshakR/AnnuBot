@@ -40,7 +40,10 @@ def ytpull(query, is_video_id=False):
 
     link = ytbase + video_data['items'][0]['id'] # video link
     video_length = video_data['items'][0]['contentDetails']['duration'][2:] # playtime
-    time = re.sub(r'(\d+)([A-Za-z]*)', r'\1:', video_length).rstrip(':') # formatted playtime
+    time = re.sub(r'(\d+)([A-Za-z]*)', r'\1:', video_length) # remove HMS markers
+    time = re.sub(r':(\d):', r':0\1:', time).rstrip(':') # pad zero for single digits
+    if time.isdigit(): # if only seconds then add colon to left
+        time = ":"+time
     return link, time
 
 
