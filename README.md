@@ -16,6 +16,8 @@ Prefix for this bot is **annu**
 - `join [connect]:` Connects to your voice channel
 - `pause [ruk]:` Pauses playback
 - `resume [chal]:` Resumes playback
+- `shuffle`: Shuffles queue\n
+- `clear`: Clears queue\n
 - `disconnect [nikal, leave]:` Disconnect from voice channel
 - `fuckoff:` Don't do this.
 - `help:` Shows this message

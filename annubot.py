@@ -1,5 +1,3 @@
-import string
-from tokenize import String
 import yt_dlp
 from utils import *
 from dotenv import load_dotenv
@@ -66,6 +64,7 @@ playerembed = discord.Embed(
 
 class GuildQueue:
 
+    # keeps track of object instances per guild
     instances = {}
 
     def __init__(self, guild_id):
@@ -73,27 +72,55 @@ class GuildQueue:
         self.guild_id = guild_id
         GuildQueue.instances[guild_id] = self
 
+    # check if the guild id has an associated queue object
     @classmethod
     def exists(cls, guild_id):
         return guild_id in cls.instances
 
-    def is_queue_empty(self):
+    # returns True if queue is empty
+    def is_queue_empty(self) -> bool:
         return self.guild_queue.empty()
 
+    # adds item to bottom of queue
     def put_in_queue(self, song):
         return self.guild_queue.put(song)
 
+    # pulls item from top of queue
     def get_latest_from_queue(self):
         if not self.is_queue_empty():
             return self.guild_queue.get()
         else:
             return None
     
+    # returns queue
     def display_queue(self):
         if not self.is_queue_empty():
             return list(self.guild_queue.queue)
         else:
             return None
+        
+    # randomize queue
+    def shuffle(self):
+        if not self.is_queue_empty():
+            # randomly shuffle queue into a separate list
+            shuffled_list = random.sample(list(self.guild_queue.queue), self.guild_queue.qsize())
+            # reset current queue
+            self.clearqueue()
+            # put items from list into queue
+            for item in shuffled_list:
+                self.guild_queue.put(item)
+            return True
+        else:
+            return None
+
+    # resets queue
+    def clearqueue(self):
+        if not self.is_queue_empty():
+            self.guild_queue = queue.Queue(-1)
+            return True
+        else:
+            return None
+
         
 @bot.event
 async def on_ready():
@@ -396,6 +423,37 @@ async def fuckoff(ctx:commands.Context):
                 "Chal nikal, time waste mat kar."]
     await ctx.send(random.choice(fuckoffs))
 
+@bot.hybrid_command(name = "shuffle", description = "Shuffle the playlist", pass_context = True)
+async def shuffle(ctx:commands.Context):
+    # check if queue exists
+    if not GuildQueue.exists(ctx.guild.id):
+        return await ctx.send("No songs in queue.")
+    else:
+        # if yes then initialise the variable to it
+        Queue_Object = GuildQueue.instances[ctx.guild.id]
+
+    shuffle_status = Queue_Object.shuffle()
+    if shuffle_status is None:
+        return await ctx.send("Queue empty!")
+    
+    return await ctx.send("Queue shuffled!")
+    
+@bot.hybrid_command(name = "clear", description = "Clears the playlist", pass_context = True)
+async def clearqueue(ctx:commands.Context):
+    # check if queue exists
+    if not GuildQueue.exists(ctx.guild.id):
+        return await ctx.send("No songs in queue.")
+    else:
+        # if yes then initialise the variable to it
+        Queue_Object = GuildQueue.instances[ctx.guild.id]
+    
+    clear_status = Queue_Object.clearqueue()
+    if clear_status is None:
+        return await ctx.send("Queue already empty!")
+    
+    return await ctx.send("Queue Cleared!")
+
+
 @bot.hybrid_command(name = "help", description = "Shows help message", pass_context = True)
 async def help(ctx:commands.Context):
     helpembed = discord.Embed()
@@ -410,6 +468,8 @@ async def help(ctx:commands.Context):
     "`join [connect]:` Connects to your voice channel\n"
     "`pause [ruk]:` Pauses playback\n"
     "`resume [chal]:` Resumes playback\n"
+    "`shuffle`: Shuffles queue\n"
+    "`clear`: Clears queue\n"
     "`disconnect [nikal, leave]:` Disconnect from voice channel\n"
     "`fuckoff:` Don't do this.\n"
     "`help:` Shows this message"
