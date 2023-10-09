@@ -49,36 +49,42 @@ def ytpull(query, is_video_id=False):
 
 # get song name from spotify URI using spotify API
 def spotifypull(uri, link_type) -> list:
-    auth_response = requests.post(auth_url, {
-    'grant_type': 'client_credentials',
-    'client_id': SPOTIFY_ID,
-    'client_secret': SPOTIFY_SECRET,
-    })
 
-    auth_response_data = auth_response.json()
-    access_token = auth_response_data['access_token']
-    headers = {
-        'Authorization': 'Bearer {token}'.format(token=access_token)
-    }
-    # gets response based on type of spotify link
-    r = requests.get(spotify_base.format(link_type=link_type, id=uri), headers=headers)
-    r = r.json()
-    # return song based on link type
-    song_names = []
+    # handles abstracted spotify .link links by getting the redirected url
+    if link_type == 'any':
+        return request(requests.get(f"https://spotify.link/{uri}").url)[0]
 
-    if link_type == 'tracks':
-        artist_names = ', '.join(artist['name'] for artist in r['artists'])
-        song_names.append(f"{r['name']} by {artist_names}")
-    elif link_type == 'playlists':
-        for i in r['tracks']['items']:
-            artist_names = ', '.join(artist['name'] for artist in i['track']['artists'])
-            song_names.append(f"{i['track']['name']} by {artist_names}")
-    elif link_type == 'albums':
-        for i in r['tracks']['items']:
-            artist_names = ', '.join(artist['name'] for artist in i['artists'])
-            song_names.append(f"{i['name']} by {artist_names}")
+    else:
+        auth_response = requests.post(auth_url, {
+        'grant_type': 'client_credentials',
+        'client_id': SPOTIFY_ID,
+        'client_secret': SPOTIFY_SECRET,
+        })
 
-    return song_names
+        auth_response_data = auth_response.json()
+        access_token = auth_response_data['access_token']
+        headers = {
+            'Authorization': 'Bearer {token}'.format(token=access_token)
+        }
+        # gets response based on type of spotify link
+        r = requests.get(spotify_base.format(link_type=link_type, id=uri), headers=headers)
+        r = r.json()
+        # return song based on link type
+        song_names = []
+
+        if link_type == 'tracks':
+            artist_names = ', '.join(artist['name'] for artist in r['artists'])
+            song_names.append(f"{r['name']} by {artist_names}")
+        elif link_type == 'playlists':
+            for i in r['tracks']['items']:
+                artist_names = ', '.join(artist['name'] for artist in i['track']['artists'])
+                song_names.append(f"{i['track']['name']} by {artist_names}")
+        elif link_type == 'albums':
+            for i in r['tracks']['items']:
+                artist_names = ', '.join(artist['name'] for artist in i['artists'])
+                song_names.append(f"{i['name']} by {artist_names}")
+
+        return song_names
 
 # checks if link is a youtube link
 def is_youtube_link(query) -> bool:
@@ -88,7 +94,7 @@ def is_youtube_link(query) -> bool:
 # checks if link is a spotify link
 def is_spotify_link(query) -> bool:
     parsed_url = urlparse(query)
-    return parsed_url.netloc == 'open.spotify.com' or parsed_url.netloc == 'spotify'
+    return parsed_url.netloc == 'open.spotify.com' or parsed_url.netloc == 'spotify' or parsed_url.netloc == 'spotify.link'
 
 # takes a query and returns the video id(for YT links) or names to be searched in youtube(non-YT links) as an array,
 # and a boolean that signifies if the query was a YT link or not
@@ -128,7 +134,8 @@ def request(query) -> (list,bool):
         (r'^https://open\.spotify\.com/playlist/([a-zA-Z0-9]+)', 'playlists'),
         (r'^spotify:track:([a-zA-Z0-9]+)', 'tracks'),
         (r'^spotify:album:([a-zA-Z0-9]+)', 'albums'),
-        (r'^spotify:playlist:([a-zA-Z0-9]+)', 'playlists')
+        (r'^spotify:playlist:([a-zA-Z0-9]+)', 'playlists'),
+        (r'https://spotify.link/([a-zA-Z0-9]+)', 'any')
         ]
         uri = None
         # finds type of spotify link (track, album or playlist)
