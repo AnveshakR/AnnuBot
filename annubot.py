@@ -171,6 +171,10 @@ async def dc(ctx:commands.Context):
     if bot_voice is None:
         await ctx.send("Bot not in any voice channel!")
     
+    # if author not in any VC
+    elif ctx.author.voice is None:
+        await ctx.send("You cannot make the bot leave.")
+
     # if author and bot are in same VC
     elif ctx.author.voice.channel == bot_voice.channel:
         await ctx.send(f"Leaving {bot_voice.channel}!")
