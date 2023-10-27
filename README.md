@@ -32,13 +32,16 @@ annu play https://www.youtube.com/watch?v=dQw4w9WgXcQ
 ## Invite link
 Invite Annubot to your server with [this link](https://discord.com/api/oauth2/authorize?client_id=826187328774733844&permissions=281894054160&scope=bot).
 
+*Don't forget to*<br>
+Join the Annubot Discord server with [this link](https://discord.gg/2eBN3q3Yvk)!
+
 ## Run it Locally!
 - After cloning this repo, place an .env file in the repo folder to be able to run it locally. The file format should be:
 ```
 DISCORD_TOKEN = <your discord token>
-SPOTIFY_ID = <your spotify id>
+SPOTIFY_ID = <your spotify client id>
 SPOTIFY_SECRET = <your spotify secret>
-YT_KEY = <your google/youtube API key>
+YT_KEY = <your Youtube API v3 key>
 ```
 - You will also need the FFMPEG binary (not the python module) accessible through PATH in your respective OS.
 - *annubot.py* is the main runfile.
