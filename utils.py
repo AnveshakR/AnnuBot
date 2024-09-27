@@ -2,8 +2,9 @@ import requests
 import os
 from dotenv import load_dotenv
 import re
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse
 import logging
+from typing import Tuple
 
 load_dotenv()
 
@@ -98,7 +99,7 @@ def is_spotify_link(query) -> bool:
 
 # takes a query and returns the video id(for YT links) or names to be searched in youtube(non-YT links) as an array,
 # and a boolean that signifies if the query was a YT link or not
-def request(query) -> (list,bool):
+def request(query) -> Tuple[list, bool]:
 
     if is_youtube_link(query): # if request is a youtube link
         video_id = None
@@ -115,6 +116,8 @@ def request(query) -> (list,bool):
             video_id = query.split("v=")[-1].split("&")[0]
         elif "list=" in query:
             playlist_id = query.split("list=")[-1].split("&")[0]
+        elif "v=" in query:
+            video_id = query.split("v=")[-1].split("&")[0]
         
         video_links = []
         # get items in playlist
@@ -124,7 +127,6 @@ def request(query) -> (list,bool):
                 video_links.append(items['contentDetails']['videoId'])
         elif video_id is not None:
             video_links.append(video_id)
-
         return video_links, True
 
     elif is_spotify_link(query): # if request is a spotify link
