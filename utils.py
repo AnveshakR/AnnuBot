@@ -2,6 +2,7 @@ import requests
 import os
 from dotenv import load_dotenv
 import re
+import unicodedata
 from urllib.parse import urlparse
 import logging
 from typing import Tuple
@@ -18,6 +19,30 @@ SPOTIFY_SECRET = os.getenv('SPOTIFY_SECRET')
 auth_url = 'https://accounts.spotify.com/api/token'
 ytbase = "https://www.youtube.com/watch?v="
 spotify_base = 'https://api.spotify.com/v1/{link_type}/{id}'
+
+# invisible/filler codepoints that render as nothing (e.g. Hangul filler U+3164)
+# but break markdown link text when used as a title.
+_INVISIBLE = {0x3164, 0x115F, 0x1160, 0xFFA0, 0x180E, 0xFEFF,
+              0x200B, 0x200C, 0x200D, 0x200E, 0x200F, 0x2060}
+
+def clean_title(title, fallback="Untitled"):
+    """Return safe, visible link-text for a title.
+
+    Strips invisible/format chars, collapses whitespace, escapes markdown link
+    special chars, and falls back to `fallback` if nothing visible remains.
+    """
+    if not title:
+        return fallback
+    out = []
+    for ch in title:
+        if ord(ch) in _INVISIBLE:
+            continue
+        if unicodedata.category(ch) in ('Cc', 'Cf', 'Co'):
+            continue
+        out.append(ch)
+    text = ' '.join(''.join(out).split())
+    text = text.replace('[', '\\[').replace(']', '\\]')
+    return text if text else fallback
 
 def ytvideolistnames(video_ids) -> list:
     if not video_ids:

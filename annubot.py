@@ -51,7 +51,9 @@ yt_dlp_opts = {
 
 ffmpeg_opts = {
     # -reconnect* keep a live stream going through transient network hiccups
-    'before_options': '-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    # -max_delay 500000 = 500ms jitter buffer: absorbs network stalls so the
+    # player doesn't underrun (lag) then rush to catch up (audio speeds up).
+    'before_options': '-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -max_delay 500000',
     'options': '-vn',
 }
 
@@ -163,6 +165,12 @@ async def on_command_error(ctx, error):
         pass  # already responded
     else:
         logger.error(f"Command error in {ctx.command}: {error}", exc_info=error)
+        # respond to the interaction so Discord doesn't show "did not respond"
+        if getattr(ctx, 'interaction', None) is not None and not ctx.interaction.response.is_done():
+            try:
+                await ctx.send("Something went wrong. Try again.")
+            except Exception:
+                pass
 
 @bot.hybrid_command(name='join', description="Joins your voice channel", aliases=['connect'], pass_context=True)
 async def join(ctx: commands.Context, bot_voice=None, loading_msg=None, called=False):
@@ -274,7 +282,7 @@ async def play_audio(ctx: commands.Context, query, is_video_id):
         await ctx.send(f"{ytvideolistnames([query])[0] if is_video_id else query} not found, skipping to next song")
         return await play_next_song(ctx)
     data = source[1]
-    title = data['title']
+    title = clean_title(data.get('title'), fallback=f"Video {data.get('id', '')}")
     ytid = data['id']
 
     async def after_play():
@@ -339,7 +347,8 @@ async def resume(ctx: commands.Context):
 async def skip(ctx: commands.Context, *, query=""):
 
     bot_voice = discord.utils.get(bot.voice_clients, guild=ctx.guild)
-    if ctx.author.voice is None or ctx.author.voice.channel != bot_voice.channel:
+    # guard: bot not in a VC, or user not in the bot's VC
+    if bot_voice is None or ctx.author.voice is None or ctx.author.voice.channel != bot_voice.channel:
         return await ctx.send("Join the bot's VC")
 
     if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
@@ -366,10 +375,10 @@ async def skip(ctx: commands.Context, *, query=""):
             temp = Queue_Object.get_latest_from_queue()
 
         # next song will be required song - after callback handles this
-        return
+        return await ctx.send(f"Skipping to song {query}")
 
     # else play the next song - after callback handles this
-    return
+    return await ctx.send("Skipped!")
 
 # displays queue
 @bot.hybrid_command(name='queue', description="Displays song queue", pass_context=True)
