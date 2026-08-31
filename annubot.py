@@ -8,9 +8,22 @@ import asyncio
 from discord.ext import commands
 import queue
 import logging
+import time
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Also write to /logs/annubot/logs-<unix timestamp>.log (Docker mount).
+# Falls back to stderr-only if the dir can't be created (local, non-root).
+try:
+    os.makedirs('/logs/annubot', exist_ok=True)
+    _log_path = f'/logs/annubot/logs-{int(time.time())}.log'
+    _fh = logging.FileHandler(_log_path)
+    _fh.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s'))
+    logging.getLogger().addHandler(_fh)
+    logger.info(f"Logging to {_log_path}")
+except Exception as e:
+    logger.warning(f"File log unavailable ({e}); using stderr only")
 
 # Fix: load libopus directly since the symlink may be missing
 import discord.opus as opus
@@ -507,4 +520,5 @@ async def help(ctx: commands.Context):
 )
     await ctx.send(embed=helpembed)
 
-bot.run(DISCORD_TOKEN)
+if __name__ == '__main__':
+    bot.run(DISCORD_TOKEN)
