@@ -282,7 +282,10 @@ async def play_audio(ctx: commands.Context, query, is_video_id):
         await ctx.send(f"{ytvideolistnames([query])[0] if is_video_id else query} not found, skipping to next song")
         return await play_next_song(ctx)
     data = source[1]
-    title = clean_title(data.get('title'), fallback=f"Video {data.get('id', '')}")
+    # empty/invisible titles render as a clickable blank space (more accurate
+    # than inventing a name). \u00a0 = non-breaking space, so Discord's markdown
+    # parser keeps the link text instead of trimming it to nothing.
+    title = clean_title(data.get('title'), fallback="\u00a0")
     ytid = data['id']
 
     async def after_play():
