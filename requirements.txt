@@ -1,6 +1,8 @@
-# Voice: discord.py 2.7+ needs davey. Do not drop below these.
+# Voice: discord.py 2.7+ needs davey AND PyNaCl. Do not drop below these.
+# (PyNaCl missing = "voice will NOT be supported" warning, bot can't join VC.)
 discord.py>=2.7.0
 davey>=0.1.0
+PyNaCl>=1.5.0
 python-dotenv>=1.0.0
 requests>=2.31.0
 # yt-dlp must stay current — a stale version extracts a YouTube URL that
