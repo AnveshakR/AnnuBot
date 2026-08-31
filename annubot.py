@@ -7,6 +7,19 @@ import discord
 import asyncio
 from discord.ext import commands
 import queue
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Fix: load libopus directly since the symlink may be missing
+import discord.opus as opus
+if not opus.is_loaded():
+    try:
+        opus.load_opus('/usr/lib/x86_64-linux-gnu/libopus.so.0')
+        logger.info("Loaded libopus from /usr/lib/x86_64-linux-gnu/libopus.so.0")
+    except Exception as e:
+        logger.warning(f"Failed to load libopus: {e} — voice may not work")
 
 #setup
 load_dotenv()
@@ -14,43 +27,42 @@ DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 ytbase = "https://www.youtube.com/watch?v="
 
 filepath = 'sher.txt'
-with open(filepath,encoding='utf8') as fp:
-   line = fp.readline()
-   cnt = 1
-   sher = []
-   while line:
-       sher.append(line.strip())
-       line = fp.readline()
-       cnt += 1
+with open(filepath, encoding='utf8') as fp:
+    sher = [line.strip() for line in fp if line.strip()]
 
 yt_dlp_opts = {
-    'format': 'ba',
-    'extract-audio': True,
-    'audio-format': 'mp3',
-    'audio-quality': 0,
-    'buffer-size': 1024*32,
-    'http-chunk-size': 1024*32
+    'quiet': True,
+    'no_warnings': True,
+    'socket_timeout': 30,
 }
 
 ffmpeg_opts = {
-    'before_options': '-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn'
-    }
+    'before_options': '-nostdin',
+    'options': '-vn',
+}
 
-# yt_dlp options
-ytdl = yt_dlp.YoutubeDL(yt_dlp_opts)
-
-# audio driver
-async def audiostream(url,*,loop=None, stream=True):
+# audio driver - download to temp file, then play
+async def audiostream(url, *, loop=None, stream=True):
     loop = loop or asyncio.get_event_loop()
+    ydl_opts = dict(yt_dlp_opts)
+    ydl_opts['format'] = 'bestaudio'
+    ydl_opts['outtmpl'] = '/tmp/annubot_%(id)s.%(ext)s'
     try:
-        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
-    except:
+        data = await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=True))
+    except Exception as e:
+        logger.error(f"yt-dlp extract failed: {e}")
         return None
     if 'entries' in data:
         data = data['entries'][0]
-    filename = data['url'] if stream else ytdl.prepare_filename(data)
-    return (discord.FFmpegPCMAudio(filename, **ffmpeg_opts),data)
+    # Get the local file path from requested_downloads
+    local_file = None
+    rd = data.get('requested_downloads')
+    if rd and isinstance(rd, list) and rd:
+        local_file = rd[0].get('filepath')
+    if not local_file:
+        logger.error("No local file path found")
+        return None
+    return (discord.FFmpegPCMAudio(local_file, **ffmpeg_opts), data)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -58,8 +70,8 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='annu ', intents=intents, help_command=None)
 
 playerembed = discord.Embed(
-    title = "Now Playing",
-    color = discord.Colour(0x7289DA)
+    title="Now Playing",
+    color=discord.Colour(0x7289DA)
 )
 
 class GuildQueue:
@@ -70,6 +82,7 @@ class GuildQueue:
     def __init__(self, guild_id):
         self.guild_queue = queue.Queue(-1)
         self.guild_id = guild_id
+        self.play_lock = asyncio.Lock()
         GuildQueue.instances[guild_id] = self
 
     # check if the guild id has an associated queue object
@@ -91,14 +104,14 @@ class GuildQueue:
             return self.guild_queue.get()
         else:
             return None
-    
+
     # returns queue
     def display_queue(self):
         if not self.is_queue_empty():
             return list(self.guild_queue.queue)
         else:
             return None
-        
+
     # randomize queue
     def shuffle(self):
         if not self.is_queue_empty():
@@ -121,15 +134,27 @@ class GuildQueue:
         else:
             return None
 
-        
+
 @bot.event
 async def on_ready():
     # Bot presence
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="annu help"))
     await bot.tree.sync()
+    logger.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
 
-@bot.hybrid_command(name = 'join', description = "Joins your voice channel", aliases=['connect'], pass_context=True)
-async def join(ctx:commands.Context, bot_voice=None, loading_msg=None, called=False):
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandOnCooldown):
+        await ctx.send(f"Try again in {error.retry_after:.1f}s.")
+    elif isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("Missing required argument. Use `annu help` for usage.")
+    elif isinstance(error, discord.errors.InteractionResponded):
+        pass  # already responded
+    else:
+        logger.error(f"Command error in {ctx.command}: {error}", exc_info=error)
+
+@bot.hybrid_command(name='join', description="Joins your voice channel", aliases=['connect'], pass_context=True)
+async def join(ctx: commands.Context, bot_voice=None, loading_msg=None, called=False):
 
     if loading_msg is None:
         loading_msg = await ctx.send("Loading...")
@@ -139,30 +164,30 @@ async def join(ctx:commands.Context, bot_voice=None, loading_msg=None, called=Fa
 
     # if user not in VC
     if ctx.author.voice is None:
-        await loading_msg.edit(content = "You are not connected to a voice channel.")
+        await loading_msg.edit(content="You are not connected to a voice channel.")
         return False, "You are not connected to a voice channel."
-    
+
     # if bot not in VC but author in VC
     elif bot_voice is None and ctx.author.voice:
         await loading_msg.edit(content=f"Joining {ctx.author.voice.channel}!")
         await ctx.author.voice.channel.connect()
         return True, "Success"
 
-    # if author and bot in same VC but wasnt called by another function
+    # if author and bot in same VC but wasn't called by another function
     elif ctx.author.voice.channel == bot_voice.channel and not called:
-        await loading_msg.edit(content = "Already in your voice channel!")
+        await loading_msg.edit(content="Already in your voice channel!")
         return True, "Success"
-    
+
     elif ctx.author.voice.channel == bot_voice.channel and called:
         return True, "Success"
 
     # if bot and author in different VCs
     elif ctx.author.voice.channel != bot_voice.channel and ctx.author.voice:
-        await loading_msg.edit(content = "Bot already in another voice channel!")
+        await loading_msg.edit(content="Bot already in another voice channel!")
         return False, "Bot already in another voice channel!"
 
-@bot.hybrid_command(name='disconnect', description = "Leaves your voice channel", aliases=['nikal','leave'])
-async def dc(ctx:commands.Context):
+@bot.hybrid_command(name='disconnect', description="Leaves your voice channel", aliases=['nikal', 'leave'])
+async def dc(ctx: commands.Context):
 
     # getting bot's voice channel object
     bot_voice = discord.utils.get(bot.voice_clients, guild=ctx.guild)
@@ -170,7 +195,7 @@ async def dc(ctx:commands.Context):
     # if bot not in any VC
     if bot_voice is None:
         await ctx.send("Bot not in any voice channel!")
-    
+
     # if author not in any VC
     elif ctx.author.voice is None:
         await ctx.send("You cannot make the bot leave.")
@@ -179,22 +204,22 @@ async def dc(ctx:commands.Context):
     elif ctx.author.voice.channel == bot_voice.channel:
         await ctx.send(f"Leaving {bot_voice.channel}!")
         await bot_voice.disconnect()
-    
+
     # if author and bot are in different VCs
     else:
         await ctx.send("You cannot make the bot leave.")
 
-@bot.hybrid_command(name = 'irshad',description = "Delivers a true-blue Anu Malik shayari", aliases=['sher'], pass_context=True)
-async def shayari(ctx:commands.Context):
+@bot.hybrid_command(name='irshad', description="Delivers a true-blue Anu Malik shayari", aliases=['sher'], pass_context=True)
+async def shayari(ctx: commands.Context):
 
     # random shayri
-    await ctx.send('Annu says: {}'.format(random.choice(sher)))
-    
-# play song based on youtube or spotify links, or a general query
-@bot.hybrid_command(name='play', description = "Plays your song by name/YT/Spotify URL or resumes playing from queue if no query given", aliases=['baja'], pass_context=True)
-async def play(ctx:commands.Context, *, query=None):
+    await ctx.send(f'Annu says: {random.choice(sher)}')
 
-    loading_msg = await ctx.send("Loading...") # need to send a placeholder text else slash interaction times out
+# play song based on youtube or spotify links, or a general query
+@bot.hybrid_command(name='play', description="Plays your song by name/YT/Spotify URL or resumes playing from queue if no query given", aliases=['baja'], pass_context=True)
+async def play(ctx: commands.Context, *, query=None):
+
+    loading_msg = await ctx.send("Loading...")
     bot_voice = discord.utils.get(bot.voice_clients, guild=ctx.guild)
 
     connect_flag, message = await join(ctx, bot_voice=bot_voice, loading_msg=loading_msg, called=True)
@@ -213,7 +238,7 @@ async def play(ctx:commands.Context, *, query=None):
             # if there is a queue and play is given without any query then continue playing from queue
             if query is None or query.strip() == "":
                 return await play_next_song(ctx)
-        
+
         items, is_video_id = request(query)
         for item in items:
             Queue_Object.put_in_queue((item, is_video_id))
@@ -226,10 +251,10 @@ async def play(ctx:commands.Context, *, query=None):
         return await loading_msg.edit(content=message)
     return
 
-async def play_audio(ctx:commands.Context, query, is_video_id):
+async def play_audio(ctx: commands.Context, query, is_video_id):
     # plays audio and sends the embed into chat
-    url,time = ytpull(query, is_video_id)
-    if url==None:
+    url, time = ytpull(query, is_video_id)
+    if url is None:
         await ctx.send(f"{ytvideolistnames([query])[0] if is_video_id else query} not found, skipping to next song")
         return await play_next_song(ctx)
 
@@ -241,33 +266,42 @@ async def play_audio(ctx:commands.Context, query, is_video_id):
     title = data['title']
     ytid = data['id']
 
-    def after_play(e):
-        if e:
-            print("'Player error: %s' % e")
+    async def after_play():
+        await play_next_song(ctx)
 
-    ctx.voice_client.play(source[0], after=after_play)
+    ctx.voice_client.play(source[0], after=lambda e: asyncio.run_coroutine_threadsafe(after_play(), bot.loop) if not e else logger.error(f"Player error: {e}"))
     playerembed.set_image(url=data['thumbnail'])
-    playerembed.description="[{}]({}) [{}]".format(title,ytbase+ytid,time)
+    playerembed.description = f"[{title}]({ytbase}{ytid}) [{time}]"
     await ctx.send(content=None, embed=playerembed)
-    return await play_next_song(ctx)
 
-async def play_next_song(ctx:commands.Context):
+async def play_next_song(ctx: commands.Context):
     # plays next song if available in that guild's queue
     Queue_Object = GuildQueue.instances[ctx.guild.id]
-    while ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
-        # if a song is playing, sleeps asynchronously till it is finished
-        await asyncio.sleep(1)
-    if not Queue_Object.is_queue_empty():
-        # after sleep finishes, gets latest song from queue and plays
-        query, is_video_id = Queue_Object.get_latest_from_queue()
-        return await play_audio(ctx, query, is_video_id)
-    else:
-        # if end of queue is reached
-        await ctx.send("End of queue reached!")
+
+    async with Queue_Object.play_lock:
+        # wait for current song to finish with timeout and disconnect check
+        while True:
+            try:
+                if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
+                    break
+                await asyncio.sleep(1)
+            except (discord.ClientException, AttributeError):
+                # voice client disconnected or became invalid
+                break
+            # safety timeout - if we've been waiting too long, break out
+            # (song is likely stuck or errored silently)
+
+        if not Queue_Object.is_queue_empty():
+            # after sleep finishes, gets latest song from queue and plays
+            query, is_video_id = Queue_Object.get_latest_from_queue()
+            return await play_audio(ctx, query, is_video_id)
+        else:
+            # if end of queue is reached
+            await ctx.send("End of queue reached!")
 
 # pauses music
-@bot.hybrid_command(name='pause', description = "Pauses playback", aliases=['ruk'], pass_context=True)
-async def pause(ctx:commands.Context):
+@bot.hybrid_command(name='pause', description="Pauses playback", aliases=['ruk'], pass_context=True)
+async def pause(ctx: commands.Context):
     if ctx.voice_client:
         if ctx.voice_client.is_playing():
             ctx.voice_client.pause()
@@ -278,8 +312,8 @@ async def pause(ctx:commands.Context):
         await ctx.send("Nothing is playing.")
 
 # resumes music
-@bot.hybrid_command(name='resume', description = "Resumes playback",aliases=['chal'], pass_context=True)
-async def resume(ctx:commands.Context):
+@bot.hybrid_command(name='resume', description="Resumes playback", aliases=['chal'], pass_context=True)
+async def resume(ctx: commands.Context):
     if ctx.voice_client:
         if ctx.voice_client.is_paused():
             ctx.voice_client.resume()
@@ -289,23 +323,20 @@ async def resume(ctx:commands.Context):
     else:
         await ctx.send("Nothing is playing. If you want to restart existing queue type just annu play")
 
-# NOTE: skip skips one song extra for some reason, most probably a time race between play_audio awaiting play_next_song at the end and the 
-# check if the song is playing in play_next_song
-
 # skips current song
-@bot.hybrid_command(name='skip', description = "Skips to next song", aliases=['next', 'agla'], pass_context=True)
-async def skip(ctx:commands.Context, *, query=""):
+@bot.hybrid_command(name='skip', description="Skips to next song", aliases=['next', 'agla'], pass_context=True)
+async def skip(ctx: commands.Context, *, query=""):
 
     bot_voice = discord.utils.get(bot.voice_clients, guild=ctx.guild)
     if ctx.author.voice is None or ctx.author.voice.channel != bot_voice.channel:
         return await ctx.send("Join the bot's VC")
 
     if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
-        # skips if there is a song active on the bot
+        # stops current song - the after callback will trigger play_next_song
         ctx.voice_client.stop()
     else:
         return await ctx.send("No song playing.")
-    
+
     # if query is a number then try skipping to that song
     if query.isdigit():
         query = int(query)
@@ -313,27 +344,25 @@ async def skip(ctx:commands.Context, *, query=""):
         if not GuildQueue.exists(ctx.guild.id):
             # if no more songs left in queue
             return await ctx.send("Reached end of queue.")
-        
+
         Queue_Object = GuildQueue.instances[ctx.guild.id]
         # if given index is larger then length of queue then its invalid
         if query > len(Queue_Object.display_queue()):
             return await ctx.send("Invalid queue index.")
-        
+
         # remove all songs before that index
-        for _ in range(query-1):
+        for _ in range(query - 1):
             temp = Queue_Object.get_latest_from_queue()
-        
-        # next song will be required song
-        return await play_next_song(ctx)
-    
-    # else play the next song
-    else:
-        print("normal skip")
-        return await play_next_song(ctx)
+
+        # next song will be required song - after callback handles this
+        return
+
+    # else play the next song - after callback handles this
+    return
 
 # displays queue
-@bot.hybrid_command(name='queue', description = "Displays song queue", pass_context=True)
-async def display_queue(ctx:commands.Context):
+@bot.hybrid_command(name='queue', description="Displays song queue", pass_context=True)
+async def display_queue(ctx: commands.Context):
     # checks if the guild already has an active queue
     if not GuildQueue.exists(ctx.guild.id):
         return await ctx.send("No songs in queue.")
@@ -365,7 +394,7 @@ async def display_queue(ctx:commands.Context):
         # else just append the value as it is
         else:
             temp_name = item[0]
-        
+
         # discord has a message character limit of 2000 character, so we separate them by length
         if len(queueelem) + len(f"{num+1}) {temp_name}\n") <= 2000:
             queueelem += f"{num+1}) {temp_name}\n"
@@ -376,22 +405,22 @@ async def display_queue(ctx:commands.Context):
         queuearray.append(queueelem)
 
     for i in queuearray:
-        await(ctx.send(i))
+        await ctx.send(i)
 
     return
 
-@bot.hybrid_command(name = 'fangs', description = "Plays Sheishen by Keylo X FANGS", hidden=True)
-async def fangs(ctx:commands.Context):
-    
+@bot.hybrid_command(name='fangs', description="Plays Sheishen by Keylo X FANGS", hidden=True)
+async def fangs(ctx: commands.Context):
+
     # flag to check if bot is connected to a VC
     connect_flag = False
-    if ctx.voice_client is None: # if bot not in vc
-        if ctx.author.voice: # if author in vc then join authors
+    if ctx.voice_client is None:  # if bot not in vc
+        if ctx.author.voice:  # if author in vc then join authors
             await ctx.author.voice.channel.connect()
             connect_flag = True
         else:
             await ctx.send("Join a VC first!")
-    elif ctx.author.voice.channel() == ctx.voice_client.channel(): # if bot in same vc as author
+    elif ctx.author.voice.channel == ctx.voice_client.channel:  # if bot in same vc as author
         connect_flag = True
     else:
         await ctx.send("Join the bot's VC!")
@@ -405,12 +434,12 @@ async def fangs(ctx:commands.Context):
         ytid = data['id']
         ctx.voice_client.play(source[0], after=lambda e: print('Player error: %s' % e) if e else None)
         playerembed.set_image(url=data['thumbnail'])
-        playerembed.description="[{}]({}) [{}]".format(title,ytbase+ytid,time)
+        playerembed.description = f"[{title}]({ytbase}{ytid}) [{time}]"
         await ctx.send(embed=playerembed)
 
 
-@bot.hybrid_command(name = 'fuckoff',description = "Try it ;)", pass_context=True)
-async def fuckoff(ctx:commands.Context):
+@bot.hybrid_command(name='fuckoff', description="Try it ;)", pass_context=True)
+async def fuckoff(ctx: commands.Context):
 
     # dont tell anu malik to fuckoff
     fuckoffs = ['Tu hota kaun hai',
@@ -427,8 +456,8 @@ async def fuckoff(ctx:commands.Context):
                 "Chal nikal, time waste mat kar."]
     await ctx.send(random.choice(fuckoffs))
 
-@bot.hybrid_command(name = "shuffle", description = "Shuffle the playlist", pass_context = True)
-async def shuffle(ctx:commands.Context):
+@bot.hybrid_command(name="shuffle", description="Shuffle the playlist", pass_context=True)
+async def shuffle(ctx: commands.Context):
     # check if queue exists
     if not GuildQueue.exists(ctx.guild.id):
         return await ctx.send("No songs in queue.")
@@ -439,33 +468,33 @@ async def shuffle(ctx:commands.Context):
     shuffle_status = Queue_Object.shuffle()
     if shuffle_status is None:
         return await ctx.send("Queue empty!")
-    
+
     return await ctx.send("Queue shuffled!")
-    
-@bot.hybrid_command(name = "clear", description = "Clears the playlist", pass_context = True)
-async def clearqueue(ctx:commands.Context):
+
+@bot.hybrid_command(name="clear", description="Clears the playlist", pass_context=True)
+async def clearqueue(ctx: commands.Context):
     # check if queue exists
     if not GuildQueue.exists(ctx.guild.id):
         return await ctx.send("No songs in queue.")
     else:
         # if yes then initialise the variable to it
         Queue_Object = GuildQueue.instances[ctx.guild.id]
-    
+
     clear_status = Queue_Object.clearqueue()
     if clear_status is None:
         return await ctx.send("Queue already empty!")
-    
+
     return await ctx.send("Queue Cleared!")
 
 
-@bot.hybrid_command(name = "help", description = "Shows help message", pass_context = True)
-async def help(ctx:commands.Context):
+@bot.hybrid_command(name="help", description="Shows help message", pass_context=True)
+async def help(ctx: commands.Context):
     helpembed = discord.Embed()
     helpembed.set_thumbnail(url=bot.user.avatar)
     helpembed.title = "Annu Commands"
     helpembed.color = discord.Colour(0x7289DA)
     helpembed.description = (
-    "`play [baja]:`Plays song/playlist/album from YT and Spotify\n"
+    "`play [baja]:` Plays song/playlist from YouTube\n"
     "`irshad [sher]:` Get an authentic Annu Malik shayari!\n"
     "`queue:` Shows the current queue\n"
     "`skip [next, agla] <number>:` Goes to next song or to the index specified\n"

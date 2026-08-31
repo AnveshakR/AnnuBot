@@ -6,6 +6,9 @@ from urllib.parse import urlparse
 import logging
 from typing import Tuple
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 load_dotenv()
 
 YT_KEY = os.getenv('YT_KEY')
@@ -17,27 +20,38 @@ ytbase = "https://www.youtube.com/watch?v="
 spotify_base = 'https://api.spotify.com/v1/{link_type}/{id}'
 
 def ytvideolistnames(video_ids) -> list:
+    if not video_ids:
+        return []
     query = '&id='+'&id='.join(video_ids)
-    r = requests.get(f"https://youtube.googleapis.com/youtube/v3/videos?part=snippet{query}&key={YT_KEY}").json()
-    names = []
-    for item in r['items']:
-        names.append(item['snippet']['title'])
-    return names
+    try:
+        r = requests.get(f"https://youtube.googleapis.com/youtube/v3/videos?part=snippet{query}&key={YT_KEY}", timeout=10).json()
+        names = []
+        for item in r['items']:
+            names.append(item['snippet']['title'])
+        return names
+    except Exception as e:
+        logger.error(f"ytvideolistnames failed: {e}")
+        return [f"Video {vid}" for vid in video_ids]
 
 # get video info from YouTube API
 def ytpull(query, is_video_id=False):
     # search for song by song ID if query is not a valid youtube ID
     if not is_video_id:
         # get video info for first search result
-        get_video_id = requests.get('https://youtube.googleapis.com/youtube/v3/search?q={}&key={}'.format(query+" explicit audio",YT_KEY))
+        get_video_id = requests.get('https://youtube.googleapis.com/youtube/v3/search?q={}&key={}'.format(query+" explicit audio", YT_KEY), timeout=10)
         try:
             query = get_video_id.json()['items'][0]['id']['videoId'] # change query to youtube ID
-        except:
+        except (KeyError, IndexError, Exception) as e:
+            logger.error(f"ytpull search failed: {e}")
             return None, None
 
     # get video info from video_id
-    get_video_details = requests.get('https://youtube.googleapis.com/youtube/v3/videos?part=contentDetails&id={}&key={}'.format(query, YT_KEY))
-    video_data = get_video_details.json()
+    get_video_details = requests.get('https://youtube.googleapis.com/youtube/v3/videos?part=contentDetails&id={}&key={}'.format(query, YT_KEY), timeout=10)
+    try:
+        video_data = get_video_details.json()
+    except Exception as e:
+        logger.error(f"ytpull details failed: {e}")
+        return None, None
 
     link = ytbase + video_data['items'][0]['id'] # video link
     video_length = video_data['items'][0]['contentDetails']['duration'][2:] # playtime
