@@ -1,4 +1,9 @@
-discord.py>=2.3.2
+# Voice: discord.py 2.7+ needs davey. Do not drop below these.
+discord.py>=2.7.0
+davey>=0.1.0
 python-dotenv>=1.0.0
 requests>=2.31.0
-yt-dlp>=2025.1.26
+# yt-dlp must stay current — a stale version extracts a YouTube URL that
+# 403s on the media fetch (this is what broke streaming). Floor at the
+# known-good version; pip will still install the latest.
+yt-dlp>=2026.8.19

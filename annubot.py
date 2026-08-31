@@ -37,32 +37,30 @@ yt_dlp_opts = {
 }
 
 ffmpeg_opts = {
-    'before_options': '-nostdin',
+    # -reconnect* keep a live stream going through transient network hiccups
+    'before_options': '-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn',
 }
 
-# audio driver - download to temp file, then play
+# audio driver - stream directly from the source URL (no temp file).
+# yt-dlp resolves a fresh signed URL per song; ffmpeg's -reconnect options
+# keep the pipe alive through transient hiccups.
 async def audiostream(url, *, loop=None, stream=True):
     loop = loop or asyncio.get_event_loop()
     ydl_opts = dict(yt_dlp_opts)
     ydl_opts['format'] = 'bestaudio'
-    ydl_opts['outtmpl'] = '/tmp/annubot_%(id)s.%(ext)s'
     try:
-        data = await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=True))
+        data = await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=False))
     except Exception as e:
         logger.error(f"yt-dlp extract failed: {e}")
         return None
     if 'entries' in data:
         data = data['entries'][0]
-    # Get the local file path from requested_downloads
-    local_file = None
-    rd = data.get('requested_downloads')
-    if rd and isinstance(rd, list) and rd:
-        local_file = rd[0].get('filepath')
-    if not local_file:
-        logger.error("No local file path found")
+    stream_url = data.get('url') if stream else None
+    if not stream_url:
+        logger.error("No stream URL found in yt-dlp result")
         return None
-    return (discord.FFmpegPCMAudio(local_file, **ffmpeg_opts), data)
+    return (discord.FFmpegPCMAudio(stream_url, **ffmpeg_opts), data)
 
 intents = discord.Intents.default()
 intents.message_content = True
