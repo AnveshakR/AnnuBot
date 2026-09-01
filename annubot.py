@@ -152,6 +152,19 @@ class SongState:
 
 _states = {}
 
+
+def _bump_generation(guild_id) -> SongState:
+    """Get (creating if needed) the guild's SongState and bump its generation.
+
+    Call this at the START of any user-initiated playback change (play, skip).
+    The bump invalidates any in-flight recovery or stale after-callback from
+    the previous player, so concurrent paths can't double-advance the queue.
+    """
+    st = _states.setdefault(guild_id, SongState())
+    st.generation += 1
+    return st
+
+
 # A stream that dies within the first MIN_RESUME_POS seconds is just a bad
 # start (cold CDN, expired URL) — restart from 0 rather than "resuming".
 # After MAX_STREAM_RETRIES failed recoveries we give up and advance the queue.
@@ -371,35 +384,51 @@ async def play_audio(ctx: commands.Context, query, is_video_id):
     ytid = data['id']
 
     # per-song state: position clock + recovery retry count + generation guard.
-    # The generation increments every time a (re)start happens for this guild,
-    # so a stale after-callback from a replaced player is ignored.
-    state = _states.setdefault(ctx.guild.id, SongState())
-    state.generation += 1
+    # Bumping the generation here (and in skip/play) invalidates any in-flight
+    # recovery or stale after-callback from the previous player, so a user
+    # action can't double-advance the queue.
+    state = _bump_generation(ctx.guild.id)
     gen = state.generation
     state.pos.seek_to(0.0)   # fresh song starts at 0
     state.retries = 0
 
     async def on_finished():
-        # stream ended normally (or the user skipped). Advance the queue.
-        st = _states.get(ctx.guild.id)
-        if st is None or st.generation != gen:
-            return  # stale: this song was already replaced
+        # Stream ended normally OR the user skipped (skip calls vc.stop(), which
+        # fires after(None)). Either way: advance the queue. NOT guarded by
+        # generation — the generation guard lives on the *starting* side (skip/
+        # play bump it before stopping the old player, so the old player's
+        # callback is the one that no-ops, not this one).
         await play_next_song(ctx)
 
     async def on_stream_error(error):
-        # The stream broke mid-song. Instead of freezing the queue (the old
-        # behaviour), re-resolve a FRESH signed URL and resume from the break
-        # point. A fresh URL is byte-seekable (verified: 206 to Range requests),
-        # so -ss <pos> lands directly with no download-from-0 penalty.
+        # The stream broke mid-song. Re-resolve a FRESH signed URL and resume
+        # from the break point. A fresh URL is byte-seekable (verified: 206 to
+        # Range requests), so -ss <pos> lands directly with no download-from-0
+        # penalty and no temp file.
         st = _states.get(ctx.guild.id)
         if st is None or st.generation != gen:
-            return  # stale
+            return  # a user action (skip/play) superseded this song
         vc = ctx.voice_client
-        if vc is None or not vc.is_connected():
-            # Voice connection is the problem, not the stream. Don't try to
-            # resume into a dead socket; leave it to voice auto-reconnect.
-            logger.warning("stream error while voice not connected: %s", error)
+        if vc is None:
             return
+        if not vc.is_connected():
+            # Voice dropped, not the stream. Wait for voice auto-reconnect
+            # (up to 30s) before resuming; abort if a user action landed.
+            logger.warning("stream error for %s while voice not connected: %s", ytid, error)
+            for _ in range(30):
+                await asyncio.sleep(1)
+                if _states.get(ctx.guild.id) is None or _states[ctx.guild.id].generation != gen:
+                    return  # superseded
+                if vc.is_connected():
+                    break
+            else:
+                logger.error("voice did not reconnect within 30s for %s; skipping", ytid)
+                try:
+                    await ctx.send("Voice connection lost — skipping this song.")
+                except Exception:
+                    pass
+                await play_next_song(ctx)
+                return
         st.retries += 1
         if st.retries > MAX_STREAM_RETRIES:
             logger.error("stream failed %d times for %s; skipping song: %s",
@@ -410,6 +439,9 @@ async def play_audio(ctx: commands.Context, query, is_video_id):
                 pass
             await play_next_song(ctx)
             return
+        # Resume from the true song position. If we waited for voice to
+        # reconnect, the listener heard dead air, so the wall-clock elapsed
+        # since the error started is the correct resume point.
         pos = st.pos.seconds()
         start = pos if pos >= MIN_RESUME_POS else 0.0
         logger.warning("stream error for %s (%s); attempt %d/%d, resuming at %.1fs",
@@ -431,7 +463,7 @@ async def play_audio(ctx: commands.Context, query, is_video_id):
             return
         # The extract above awaited; a skip/play may have replaced this song in
         # the meantime. If so, drop the recovery — the new song owns the player.
-        if st.generation != gen:
+        if _states.get(ctx.guild.id) is None or _states[ctx.guild.id].generation != gen:
             logger.info("recovery superseded for %s; dropping resume", ytid)
             try:
                 fresh[0].cleanup()
@@ -532,9 +564,22 @@ async def skip(ctx: commands.Context, *, query=""):
         return await ctx.send("Join the bot's VC")
 
     if ctx.voice_client.is_playing() or ctx.voice_client.is_paused():
+        # Bump generation FIRST so a stale after-callback from the player we're
+        # about to stop can't double-advance the queue, then stop it.
+        _bump_generation(ctx.guild.id)
         # stops current song - the after callback will trigger play_next_song
         ctx.voice_client.stop()
     else:
+        # Player is None. Either nothing is playing, OR a stream recovery is in
+        # flight (player was stopped while a fresh URL is being resolved). In
+        # the latter case the in-flight recovery would otherwise resume the old
+        # song after its extract completes — bump the generation so it drops
+        # out, then advance directly.
+        st = _states.get(ctx.guild.id)
+        if st is not None and st.generation > 0:
+            _bump_generation(ctx.guild.id)
+            await ctx.send("Skipped!")
+            return await play_next_song(ctx)
         return await ctx.send("No song playing.")
 
     # if query is a number then try skipping to that song
