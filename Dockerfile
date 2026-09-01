@@ -1,4 +1,7 @@
-FROM python:3.10.11
+# 3.11: yt-dlp deprecates 3.10 (recurring "Support for Python version 3.10 has
+# been deprecated" warning in the logs). davey (voice codec) ships cp311
+# manylinux x86_64 wheels, so the voice stack is unaffected.
+FROM python:3.11.9
 
 WORKDIR /app
 
