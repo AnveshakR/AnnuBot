@@ -50,17 +50,31 @@ yt_dlp_opts = {
 }
 
 ffmpeg_opts = {
-    # -reconnect* keep a live stream going through transient network hiccups
+    # -rw_timeout 5000000 (5s, microseconds): make ffmpeg FAIL FAST on a dead
+    # stream instead of hanging forever. A real break (CDN drops the signed URL)
+    # is permanent, so there is nothing to "wait out" — fast failure is what
+    # triggers the after-callback resume. Sub-second network blips are absorbed
+    # by -max_delay before this ever fires.
+    #
+    # NOTE: the old -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5
+    # flags are for LIVE streams. On a signed YouTube URL they make ffmpeg issue
+    # Range requests the CDN rejects with HTTP 416 ("Requested range not
+    # satisfiable") — that produced 54 "Will reconnect ... error=Input/output
+    # error" lines in the Aug 31 logs. They can never work here. Removed.
+    #
     # -max_delay 500000 = 500ms jitter buffer: absorbs network stalls so the
     # player doesn't underrun (lag) then rush to catch up (audio speeds up).
-    'before_options': '-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -max_delay 500000',
+    'before_options': '-nostdin -rw_timeout 5000000 -max_delay 500000',
     'options': '-vn',
 }
 
 # audio driver - stream directly from the source URL (no temp file).
-# yt-dlp resolves a fresh signed URL per song; ffmpeg's -reconnect options
-# keep the pipe alive through transient hiccups.
-async def audiostream(url, *, loop=None, stream=True):
+# yt-dlp resolves a fresh signed URL per song. `start` (seconds) does an input
+# seek (-ss before -i) so a resume can jump straight to the break point.
+# Verified on dellarch (production yt-dlp + ffmpeg): a FRESH signed URL returns
+# 206 Partial Content to a Range request, so the seek lands directly with no
+# download-from-0 penalty (~0.13s to first audio byte).
+async def audiostream(url, *, loop=None, stream=True, start=0.0):
     loop = loop or asyncio.get_event_loop()
     ydl_opts = dict(yt_dlp_opts)
     ydl_opts['format'] = 'bestaudio'
@@ -75,7 +89,74 @@ async def audiostream(url, *, loop=None, stream=True):
     if not stream_url:
         logger.error("No stream URL found in yt-dlp result")
         return None
-    return (discord.FFmpegPCMAudio(stream_url, **ffmpeg_opts), data)
+    opts = dict(ffmpeg_opts)
+    if start and start > 0:
+        # input seek: -ss must come BEFORE -i (see FFmpegPCMAudio arg order).
+        opts['before_options'] = f"{ffmpeg_opts['before_options']} -ss {start:.3f}"
+    return (discord.FFmpegPCMAudio(stream_url, **opts), data)
+
+
+class SongPosition:
+    """Tracks a song's playback position in seconds, pause-aware.
+
+    discord.py 2.7.1 removed get_position(), so we track it ourselves with a
+    monotonic clock. Pausing freezes the clock; resuming resumes it, so the
+    reported position is the true song position (not wall time).
+    """
+
+    def __init__(self):
+        self._start = time.perf_counter()
+        self._paused_total = 0.0
+        self._pause_at = None
+
+    def pause(self):
+        if self._pause_at is None:
+            self._pause_at = time.perf_counter()
+
+    def resume(self):
+        if self._pause_at is not None:
+            self._paused_total += time.perf_counter() - self._pause_at
+            self._pause_at = None
+
+    def seconds(self) -> float:
+        now = time.perf_counter()
+        if self._pause_at is not None:
+            now = self._pause_at  # paused: position frozen at the pause point
+        return max(0.0, now - self._start - self._paused_total)
+
+    def seek_to(self, seconds: float):
+        """Move the position pointer to `seconds`.
+
+        Used when a resume starts a fresh stream at -ss <seconds>: the new
+        clock must read `seconds` at t=0 and continue from there.
+        """
+        self._start = time.perf_counter() - seconds
+        self._paused_total = 0.0
+        self._pause_at = None
+
+
+# per-guild playback state, keyed by guild id (one song playing per guild).
+class SongState:
+    """Per-song playback state: position tracker + stream-recovery retry count.
+
+    `generation` is bumped every time a new (re)start begins for a guild. The
+    after-callbacks capture the generation at start time and ignore themselves
+    if it has moved on — that prevents a stale callback from a replaced player
+    (e.g. a manual `skip` mid-recovery) from double-advancing the queue.
+    """
+    def __init__(self):
+        self.pos = SongPosition()
+        self.retries = 0
+        self.generation = 0
+
+
+_states = {}
+
+# A stream that dies within the first MIN_RESUME_POS seconds is just a bad
+# start (cold CDN, expired URL) — restart from 0 rather than "resuming".
+# After MAX_STREAM_RETRIES failed recoveries we give up and advance the queue.
+MAX_STREAM_RETRIES = 2
+MIN_RESUME_POS = 3.0
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -289,10 +370,97 @@ async def play_audio(ctx: commands.Context, query, is_video_id):
     title = clean_title(data.get('title'), fallback="_")
     ytid = data['id']
 
-    async def after_play():
+    # per-song state: position clock + recovery retry count + generation guard.
+    # The generation increments every time a (re)start happens for this guild,
+    # so a stale after-callback from a replaced player is ignored.
+    state = _states.setdefault(ctx.guild.id, SongState())
+    state.generation += 1
+    gen = state.generation
+    state.pos.seek_to(0.0)   # fresh song starts at 0
+    state.retries = 0
+
+    async def on_finished():
+        # stream ended normally (or the user skipped). Advance the queue.
+        st = _states.get(ctx.guild.id)
+        if st is None or st.generation != gen:
+            return  # stale: this song was already replaced
         await play_next_song(ctx)
 
-    ctx.voice_client.play(source[0], after=lambda e: asyncio.run_coroutine_threadsafe(after_play(), bot.loop) if not e else logger.error(f"Player error: {e}"))
+    async def on_stream_error(error):
+        # The stream broke mid-song. Instead of freezing the queue (the old
+        # behaviour), re-resolve a FRESH signed URL and resume from the break
+        # point. A fresh URL is byte-seekable (verified: 206 to Range requests),
+        # so -ss <pos> lands directly with no download-from-0 penalty.
+        st = _states.get(ctx.guild.id)
+        if st is None or st.generation != gen:
+            return  # stale
+        vc = ctx.voice_client
+        if vc is None or not vc.is_connected():
+            # Voice connection is the problem, not the stream. Don't try to
+            # resume into a dead socket; leave it to voice auto-reconnect.
+            logger.warning("stream error while voice not connected: %s", error)
+            return
+        st.retries += 1
+        if st.retries > MAX_STREAM_RETRIES:
+            logger.error("stream failed %d times for %s; skipping song: %s",
+                         st.retries, ytid, error)
+            try:
+                await ctx.send("Stream kept dropping — skipping this song.")
+            except Exception:
+                pass
+            await play_next_song(ctx)
+            return
+        pos = st.pos.seconds()
+        start = pos if pos >= MIN_RESUME_POS else 0.0
+        logger.warning("stream error for %s (%s); attempt %d/%d, resuming at %.1fs",
+                       ytid, error, st.retries, MAX_STREAM_RETRIES, start)
+        try:
+            await ctx.send(f"Stream hiccup — recovering (~{start:.0f}s in)…")
+        except Exception:
+            pass
+        # The old ffmpeg process is already dead (that's what raised the error);
+        # stop() clears the dead player so play() below can start a fresh one.
+        try:
+            vc.stop()
+        except Exception:
+            pass
+        fresh = await audiostream(url, loop=bot.loop, stream=True, start=start)
+        if fresh is None:
+            logger.error("re-extract failed for %s; skipping song", ytid)
+            await play_next_song(ctx)
+            return
+        # The extract above awaited; a skip/play may have replaced this song in
+        # the meantime. If so, drop the recovery — the new song owns the player.
+        if st.generation != gen:
+            logger.info("recovery superseded for %s; dropping resume", ytid)
+            try:
+                fresh[0].cleanup()
+            except Exception:
+                pass
+            return
+        st.pos.seek_to(start)
+        try:
+            vc.play(fresh[0], after=_make_after(ctx, gen, on_finished, on_stream_error))
+        except discord.ClientException as e:
+            # something else grabbed the player (e.g. a concurrent play) — don't
+            # fight it; the other path owns playback from here.
+            logger.warning("could not restart stream for %s: %s", ytid, e)
+            try:
+                fresh[0].cleanup()
+            except Exception:
+                pass
+
+    def _make_after(ctx, gen, on_finished, on_stream_error):
+        def after(error):
+            # Called from the audio-player thread; hop onto the event loop.
+            coro = on_finished() if error is None else on_stream_error(error)
+            try:
+                asyncio.run_coroutine_threadsafe(coro, bot.loop)
+            except Exception:
+                logger.exception("failed to schedule after-callback")
+        return after
+
+    ctx.voice_client.play(source[0], after=_make_after(ctx, gen, on_finished, on_stream_error))
     playerembed.set_image(url=data['thumbnail'])
     playerembed.description = f"[{title}]({ytbase}{ytid}) [{time}]"
     await ctx.send(content=None, embed=playerembed)
@@ -328,6 +496,11 @@ async def pause(ctx: commands.Context):
     if ctx.voice_client:
         if ctx.voice_client.is_playing():
             ctx.voice_client.pause()
+            # freeze the position clock so a later resume recovers from the
+            # paused second, not from wall time.
+            st = _states.get(ctx.guild.id)
+            if st is not None:
+                st.pos.pause()
             await ctx.send("Paused!")
         else:
             await ctx.send("Music already paused. Do you mean to resume?")
@@ -340,6 +513,9 @@ async def resume(ctx: commands.Context):
     if ctx.voice_client:
         if ctx.voice_client.is_paused():
             ctx.voice_client.resume()
+            st = _states.get(ctx.guild.id)
+            if st is not None:
+                st.pos.resume()
             await ctx.send("Resumed!")
         else:
             await ctx.send("Music already playing. Do you mean to pause?")
@@ -408,13 +584,21 @@ async def display_queue(ctx: commands.Context):
 
     queuearray = []
     queueelem = ""
-    # Iterate through the original queue
+    # NOTE: processed_values can be SHORTER than the number of YT entries if the
+    # YouTube API fails to resolve some IDs (deleted/region-locked videos are
+    # omitted from the response). pop(0) in lockstep then runs off the end and
+    # raised IndexError (seen 3x in the Aug 31 logs). Use an iterator and fall
+    # back to the raw value when names run out.
+    name_iter = iter(processed_values)
+    # Iterate over the original queue
     for num, item in enumerate(queuelist):
         temp_name = ""
         # if the value is a YT link, get the value from the names list
         if item[1]:
-            processed_value = processed_values.pop(0)
-            temp_name = processed_value
+            try:
+                temp_name = next(name_iter)
+            except StopIteration:
+                temp_name = item[0]  # name lookup fell short; use the raw link
         # else just append the value as it is
         else:
             temp_name = item[0]
