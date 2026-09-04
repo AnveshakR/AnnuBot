@@ -365,16 +365,22 @@ async def play(ctx: commands.Context, *, query=None):
     return
 
 async def play_audio(ctx: commands.Context, query, is_video_id):
-    # plays audio and sends the embed into chat
+    # plays audio and sends the embed into chat.
+    # Returns True once a song is actually playing, False if the song could
+    # not be resolved/extracted (caller advances the queue). MUST NOT call
+    # play_next_song itself: callers may already hold play_lock, and
+    # asyncio.Lock is not re-entrant — the old recursive call deadlocked the
+    # whole queue on the first "not found" song (freeze: nothing could
+    # pause/resume/skip).
     url, time = ytpull(query, is_video_id)
     if url is None:
         await ctx.send(f"{ytvideolistnames([query])[0] if is_video_id else query} not found, skipping to next song")
-        return await play_next_song(ctx)
+        return False
 
     source = await audiostream(url, loop=bot.loop, stream=True)
     if source is None:
         await ctx.send(f"{ytvideolistnames([query])[0] if is_video_id else query} not found, skipping to next song")
-        return await play_next_song(ctx)
+        return False
     data = source[1]
     # empty/invisible titles: use "_" as a visible placeholder. Whitespace-only
     # labels (space/nbsp) are NOT rendered as links by Discord (it trims them and
@@ -496,6 +502,7 @@ async def play_audio(ctx: commands.Context, query, is_video_id):
     playerembed.set_image(url=data['thumbnail'])
     playerembed.description = f"[{title}]({ytbase}{ytid}) [{time}]"
     await ctx.send(content=None, embed=playerembed)
+    return True
 
 async def play_next_song(ctx: commands.Context):
     # plays next song if available in that guild's queue
@@ -514,13 +521,20 @@ async def play_next_song(ctx: commands.Context):
             # safety timeout - if we've been waiting too long, break out
             # (song is likely stuck or errored silently)
 
-        if not Queue_Object.is_queue_empty():
-            # after sleep finishes, gets latest song from queue and plays
+        # Bounded loop: keep advancing while songs fail to resolve (the old
+        # recursive play_audio -> play_next_song call deadlocked here on a
+        # "not found" song because play_lock is not re-entrant). A song that
+        # actually starts playing returns True and ends the loop; an empty
+        # queue ends it too.
+        while True:
+            if Queue_Object.is_queue_empty():
+                # if end of queue is reached
+                await ctx.send("End of queue reached!")
+                return
+            # gets latest song from queue and plays
             query, is_video_id = Queue_Object.get_latest_from_queue()
-            return await play_audio(ctx, query, is_video_id)
-        else:
-            # if end of queue is reached
-            await ctx.send("End of queue reached!")
+            if await play_audio(ctx, query, is_video_id):
+                return
 
 # pauses music
 @bot.hybrid_command(name='pause', description="Pauses playback", aliases=['ruk'], pass_context=True)
