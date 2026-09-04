@@ -502,10 +502,9 @@ async def play_audio(ctx: commands.Context, query, is_video_id):
         start = pos if pos >= MIN_RESUME_POS else 0.0
         logger.warning("stream error for %s (%s); attempt %d/%d, resuming at %.1fs",
                        ytid, error, st.retries, MAX_STREAM_RETRIES, start)
-        try:
-            await ctx.send(f"Stream hiccup — recovering (~{start:.0f}s in)…")
-        except Exception:
-            pass
+        # No chat message here: the resume is transparent to the listener
+        # (fresh URL + -ss seek lands at the break point). The log line above
+        # is enough; a per-resume "recovering..." message was just noise.
         # The old ffmpeg process is already dead (that's what raised the error);
         # stop() clears the dead player so play() below can start a fresh one.
         try:
