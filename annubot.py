@@ -13,11 +13,13 @@ import time
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Also write to /logs/annubot/logs-<unix timestamp>.log (Docker mount).
-# Falls back to stderr-only if the dir can't be created (local, non-root).
+# Also write to a per-run log file. On the host (no docker) that is
+# ~/annubot-deploy/logs/; the old /logs/annubot was a docker volume mount.
+# Falls back to stderr-only if the dir can't be created.
 try:
-    os.makedirs('/logs/annubot', exist_ok=True)
-    _log_path = f'/logs/annubot/logs-{int(time.time())}.log'
+    _log_dir = os.path.join(os.path.expanduser('~'), 'annubot-deploy', 'logs')
+    os.makedirs(_log_dir, exist_ok=True)
+    _log_path = os.path.join(_log_dir, f'logs-{int(time.time())}.log')
     _fh = logging.FileHandler(_log_path)
     _fh.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s'))
     logging.getLogger().addHandler(_fh)
@@ -25,14 +27,27 @@ try:
 except Exception as e:
     logger.warning(f"File log unavailable ({e}); using stderr only")
 
-# Fix: load libopus directly since the symlink may be missing
+# Fix: load libopus directly since the symlink may be missing.
+# Try the common distro locations (Debian/Ubuntu multiarch vs Arch/flat /usr/lib).
 import discord.opus as opus
 if not opus.is_loaded():
-    try:
-        opus.load_opus('/usr/lib/x86_64-linux-gnu/libopus.so.0')
-        logger.info("Loaded libopus from /usr/lib/x86_64-linux-gnu/libopus.so.0")
-    except Exception as e:
-        logger.warning(f"Failed to load libopus: {e} — voice may not work")
+    _opus_candidates = [
+        '/usr/lib/x86_64-linux-gnu/libopus.so.0',  # Debian/Ubuntu (docker image)
+        '/usr/lib/libopus.so.0',                   # Arch / flat multiarch
+        '/usr/lib64/libopus.so.0',                 # RHEL-family
+        '/usr/local/lib/libopus.so.0',
+    ]
+    _loaded = False
+    for _p in _opus_candidates:
+        try:
+            opus.load_opus(_p)
+            logger.info(f"Loaded libopus from {_p}")
+            _loaded = True
+            break
+        except Exception:
+            continue
+    if not _loaded and not opus.is_loaded():
+        logger.warning("Failed to load libopus from known paths — voice may not work")
 
 #setup
 load_dotenv()
