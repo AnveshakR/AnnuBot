@@ -9,6 +9,7 @@ from discord.ext import commands
 import queue
 import logging
 import time
+from prefetch import PrefetchStream, PrefetchedFFmpegPCMAudio
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -64,31 +65,17 @@ yt_dlp_opts = {
     'socket_timeout': 30,
 }
 
-ffmpeg_opts = {
-    # -rw_timeout 5000000 (5s, microseconds): make ffmpeg FAIL FAST on a dead
-    # stream instead of hanging forever. A real break (CDN drops the signed URL)
-    # is permanent, so there is nothing to "wait out" — fast failure is what
-    # triggers the after-callback resume. Sub-second network blips are absorbed
-    # by -max_delay before this ever fires.
-    #
-    # NOTE: the old -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5
-    # flags are for LIVE streams. On a signed YouTube URL they make ffmpeg issue
-    # Range requests the CDN rejects with HTTP 416 ("Requested range not
-    # satisfiable") — that produced 54 "Will reconnect ... error=Input/output
-    # error" lines in the Aug 31 logs. They can never work here. Removed.
-    #
-    # -max_delay 500000 = 500ms jitter buffer: absorbs network stalls so the
-    # player doesn't underrun (lag) then rush to catch up (audio speeds up).
-    'before_options': '-nostdin -rw_timeout 5000000 -max_delay 500000',
-    'options': '-vn',
-}
-
-# audio driver - stream directly from the source URL (no temp file).
-# yt-dlp resolves a fresh signed URL per song. `start` (seconds) does an input
-# seek (-ss before -i) so a resume can jump straight to the break point.
-# Verified on dellarch (production yt-dlp + ffmpeg): a FRESH signed URL returns
-# 206 Partial Content to a Range request, so the seek lands directly with no
-# download-from-0 penalty (~0.13s to first audio byte).
+# NOTE: ffmpeg no longer reads the network directly. The signed googlevideo URL
+# is pulled into RAM by PrefetchStream (ranged 1MiB chunks, retry-at-same-offset)
+# and fed to ffmpeg over stdin. googlevideo kills a single long-lived GET that is
+# drained at ~1x playback pace after ~30s (the ~31s cadence); ranged chunks never
+# hold such a socket, so the reset can't happen. A failed chunk retries at the
+# SAME byte offset, so a reset never leaves a hole in the byte stream.
+#
+# The old network-facing flags are gone: -rw_timeout was a hair trigger (a 5s
+# read gap under CDN throttling killed the process), -max_delay is a demuxer
+# option that does nothing here, and -nostdin must go because we now pipe to
+# stdin on purpose.
 async def audiostream(url, *, loop=None, stream=True, start=0.0):
     loop = loop or asyncio.get_event_loop()
     ydl_opts = dict(yt_dlp_opts)
@@ -104,11 +91,18 @@ async def audiostream(url, *, loop=None, stream=True, start=0.0):
     if not stream_url:
         logger.error("No stream URL found in yt-dlp result")
         return None
-    opts = dict(ffmpeg_opts)
-    if start and start > 0:
-        # input seek: -ss must come BEFORE -i (see FFmpegPCMAudio arg order).
-        opts['before_options'] = f"{ffmpeg_opts['before_options']} -ss {start:.3f}"
-    return (discord.FFmpegPCMAudio(stream_url, **opts), data)
+
+    def _refresh():
+        # The signed URL expires; re-resolve a fresh one. A retry happens at the
+        # SAME byte offset, so a stale-URL failure never leaves a gap.
+        d = yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=False)
+        if 'entries' in d:
+            d = d['entries'][0]
+        return d.get('url')
+
+    src = PrefetchStream(stream_url, headers=data.get('http_headers'), refresh=_refresh)
+    before = f'-ss {start:.3f}' if (start and start > 0) else None
+    return (PrefetchedFFmpegPCMAudio(src, before_options=before, options='-vn'), data)
 
 
 class SongPosition:
