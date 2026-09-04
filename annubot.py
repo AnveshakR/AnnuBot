@@ -163,6 +163,9 @@ class SongState:
         self.pos = SongPosition()
         self.retries = 0
         self.generation = 0
+        # Positions already resumed from after a tail drop (progress guard:
+        # if the CDN keeps cutting the same tail, stop looping and advance).
+        self.tail_resume_positions = []
 
 
 _states = {}
@@ -185,6 +188,11 @@ def _bump_generation(guild_id) -> SongState:
 # After MAX_STREAM_RETRIES failed recoveries we give up and advance the queue.
 MAX_STREAM_RETRIES = 2
 MIN_RESUME_POS = 3.0
+# A "clean" finish that lands more than TAIL_TOLERANCE seconds short of the
+# song's known duration is not a real end — it's the CDN dropping the socket
+# near the end, which ffmpeg reads as EOF (so on_stream_error never fires).
+# We treat it as a resumable break instead of advancing the queue.
+TAIL_TOLERANCE = 5.0
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -412,17 +420,43 @@ async def play_audio(ctx: commands.Context, query, is_video_id):
     gen = state.generation
     state.pos.seek_to(0.0)   # fresh song starts at 0
     state.retries = 0
+    state.tail_resume_positions = []
 
     async def on_finished():
-        # Stream ended normally OR the user skipped (skip calls vc.stop(), which
-        # fires after(None)). Either way: advance the queue. NOT guarded by
-        # generation — the generation guard lives on the *starting* side (skip/
-        # play bump it before stopping the old player, so the old player's
-        # callback is the one that no-ops, not this one).
+        # after(None) means the stream hit EOF. That is EITHER a genuine end,
+        # the user skipping (skip calls vc.stop()), OR — the case this guards —
+        # the CDN dropping the socket near the end, which ffmpeg reads as EOF
+        # rather than an error (so on_stream_error never fires and the last
+        # 10-15s silently vanish). If we're still significantly short of the
+        # song's known duration, treat it as a break and resume from the break
+        # point instead of advancing the queue. NOT generation-guarded: the
+        # guard lives on the *starting* side (skip/play bump it before stopping
+        # the old player, so the old player's callback no-ops, not this one).
+        st = _states.get(ctx.guild.id)
+        if st is not None and st.generation == gen:
+            dur = data.get('duration')
+            pos = st.pos.seconds()
+            if dur and pos < dur - TAIL_TOLERANCE:
+                # Progress guard: if we've already resumed from (near) this
+                # point, the CDN keeps cutting the same tail — stop looping and
+                # advance rather than resuming forever.
+                if any(abs(pos - p) < 3.0 for p in st.tail_resume_positions):
+                    logger.error("tail recovery loop for %s at %.1fs; advancing", ytid, pos)
+                    await play_next_song(ctx)
+                    return
+                st.tail_resume_positions.append(pos)
+                logger.warning("song %s ended early at %.1fs of %.1fs (CDN dropped the tail); resuming",
+                               ytid, pos, dur)
+                await on_stream_error(
+                    f"ended at {pos:.1f}s of {dur:.1f}s (CDN dropped the tail)",
+                    count_retry=False)
+                return
+        # Genuine end (or superseded): advance the queue.
         await play_next_song(ctx)
 
-    async def on_stream_error(error):
-        # The stream broke mid-song. Re-resolve a FRESH signed URL and resume
+    async def on_stream_error(error, *, count_retry=True):
+        # The stream broke mid-song (or the CDN dropped the tail, which
+        # on_finished routes here). Re-resolve a FRESH signed URL and resume
         # from the break point. A fresh URL is byte-seekable (verified: 206 to
         # Range requests), so -ss <pos> lands directly with no download-from-0
         # penalty and no temp file.
@@ -450,16 +484,17 @@ async def play_audio(ctx: commands.Context, query, is_video_id):
                     pass
                 await play_next_song(ctx)
                 return
-        st.retries += 1
-        if st.retries > MAX_STREAM_RETRIES:
-            logger.error("stream failed %d times for %s; skipping song: %s",
-                         st.retries, ytid, error)
-            try:
-                await ctx.send("Stream kept dropping — skipping this song.")
-            except Exception:
-                pass
-            await play_next_song(ctx)
-            return
+        if count_retry:
+            st.retries += 1
+            if st.retries > MAX_STREAM_RETRIES:
+                logger.error("stream failed %d times for %s; skipping song: %s",
+                             st.retries, ytid, error)
+                try:
+                    await ctx.send("Stream kept dropping — skipping this song.")
+                except Exception:
+                    pass
+                await play_next_song(ctx)
+                return
         # Resume from the true song position. If we waited for voice to
         # reconnect, the listener heard dead air, so the wall-clock elapsed
         # since the error started is the correct resume point.
