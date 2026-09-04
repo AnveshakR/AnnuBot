@@ -58,6 +58,25 @@ def ytvideolistnames(video_ids) -> list:
         logger.error(f"ytvideolistnames failed: {e}")
         return [f"Video {vid}" for vid in video_ids]
 
+def format_duration(iso: str) -> str:
+    """Format a YouTube Data API ISO 8601 duration (e.g. PT2H34M, PT2M34S)
+    as a human-readable clock time.
+
+    Returns H:MM:SS when the duration is an hour or longer, M:SS otherwise.
+    The old two-regex hack mangled hours into the minutes slot (PT2H34M ->
+    "2:34" instead of "2:34:00") and never padded single-digit fields.
+    """
+    m = re.match(r"^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$", iso or "")
+    if not m:
+        logger.error(f"unparseable duration: {iso!r}")
+        return "0:00"
+    days, hours, minutes, seconds = (int(g) if g else 0 for g in m.groups())
+    total = ((days * 24 + hours) * 60 + minutes) * 60 + seconds
+    h, rem = divmod(total, 3600)
+    mi, s = divmod(rem, 60)
+    return f"{h}:{mi:02d}:{s:02d}" if h else f"{mi}:{s:02d}"
+
+
 # get video info from YouTube API
 def ytpull(query, is_video_id=False):
     # search for song by song ID if query is not a valid youtube ID
@@ -79,11 +98,8 @@ def ytpull(query, is_video_id=False):
         return None, None
 
     link = ytbase + video_data['items'][0]['id'] # video link
-    video_length = video_data['items'][0]['contentDetails']['duration'][2:] # playtime
-    time = re.sub(r'(\d+)([A-Za-z]*)', r'\1:', video_length) # remove HMS markers
-    time = re.sub(r':(\d):', r':0\1:', time).rstrip(':') # pad zero for single digits
-    if time.isdigit(): # if only seconds then add colon to left
-        time = ":"+time
+    video_length = video_data['items'][0]['contentDetails']['duration'] # playtime
+    time = format_duration(video_length)
     return link, time
 
 
