@@ -282,6 +282,68 @@ async def on_command_error(ctx, error):
             except Exception:
                 pass
 
+# Auto-leave empty voice channels.
+# If everyone leaves the bot's VC (or the bot is left alone), it stays for
+# EMPTY_VC_LEAVE_DELAY seconds and then disconnects. A voice_state_update with
+# a member (re)joining the bot's VC cancels the pending leave.
+EMPTY_VC_LEAVE_DELAY = 30  # seconds
+_leave_tasks = {}  # guild_id -> pending auto-leave Task
+
+
+def _empty_people(channel):
+    # everyone in the channel except bots (the bot itself + any other bots)
+    return [m for m in channel.members if not m.bot]
+
+
+async def _do_leave(guild, channel):
+    await asyncio.sleep(EMPTY_VC_LEAVE_DELAY)
+    vc = discord.utils.get(bot.voice_clients, guild=guild)
+    # only leave if we're still in the same channel and it's still empty
+    if vc is not None and vc.channel is channel and _empty_people(channel) == []:
+        logger.info(f"Empty VC in {guild} for {EMPTY_VC_LEAVE_DELAY}s, leaving {channel}")
+        try:
+            if guild.system_channel is not None:
+                await guild.system_channel.send(f"Leaving {channel} — it's been empty for {EMPTY_VC_LEAVE_DELAY}s.")
+        except Exception:
+            pass  # no perms / channel gone; leave anyway
+        await vc.disconnect()
+
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    vc = discord.utils.get(bot.voice_clients, guild=member.guild)
+    if vc is None or vc.channel is None:
+        return
+    bot_channel = vc.channel
+
+    # the bot itself moved (join/leave) -> reset tracking for its new channel.
+    # Checked FIRST: the bot's own join/leave must not be treated as a human
+    # re-join (which would just cancel a leave) or a human departure.
+    if member == bot.user:
+        task = _leave_tasks.pop(member.guild.id, None)
+        if task is not None and not task.done():
+            task.cancel()
+        if after.channel is not None and _empty_people(after.channel) == []:
+            logger.info(f"Bot in empty VC {after.channel}, leaving in {EMPTY_VC_LEAVE_DELAY}s")
+            _leave_tasks[member.guild.id] = asyncio.create_task(_do_leave(member.guild, after.channel))
+        return
+
+    # a non-bot member (re)joined the bot's channel -> cancel any pending leave
+    if after.channel is bot_channel and before.channel is not bot_channel:
+        task = _leave_tasks.pop(member.guild.id, None)
+        if task is not None and not task.done():
+            task.cancel()
+            logger.info(f"Auto-leave cancelled: someone joined {bot_channel}")
+        return
+
+    # a non-bot member left the bot's channel -> maybe start the countdown
+    if before.channel is bot_channel and after.channel is not bot_channel:
+        if _empty_people(bot_channel) == []:
+            existing = _leave_tasks.get(member.guild.id)
+            if existing is None or existing.done():
+                logger.info(f"VC {bot_channel} emptied, leaving in {EMPTY_VC_LEAVE_DELAY}s")
+                _leave_tasks[member.guild.id] = asyncio.create_task(_do_leave(member.guild, bot_channel))
+
 @bot.hybrid_command(name='join', description="Joins your voice channel", aliases=['connect'], pass_context=True)
 async def join(ctx: commands.Context, bot_voice=None, loading_msg=None, called=False):
 
