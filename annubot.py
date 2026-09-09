@@ -1,5 +1,6 @@
 import yt_dlp
 from utils import *
+from config import CONFIG
 from dotenv import load_dotenv
 import os
 import random
@@ -271,6 +272,14 @@ async def on_command_error(ctx, error):
         await ctx.send(f"Try again in {error.retry_after:.1f}s.")
     elif isinstance(error, commands.MissingRequiredArgument):
         await ctx.send("Missing required argument. Use `annu help` for usage.")
+    elif isinstance(error, NotInWorkingChannel):
+        # working channel is set and this command came from somewhere else
+        wc = CONFIG.working_channel(ctx.guild.id)
+        ch = ctx.guild.get_channel(wc) if ctx.guild else None
+        where = ch.mention if ch is not None else f"channel {wc}"
+        await ctx.send(f"I only work in {where} right now.")
+    elif isinstance(error, NotAdmin):
+        await ctx.send("You need admin to do that.")
     elif isinstance(error, discord.errors.InteractionResponded):
         pass  # already responded
     else:
@@ -281,6 +290,114 @@ async def on_command_error(ctx, error):
                 await ctx.send("Something went wrong. Try again.")
             except Exception:
                 pass
+
+
+# --- permission + working-channel gating -----------------------------------
+# Two independent gates, both per-guild and opt-in:
+#
+#  * in_working_channel (global check, every command): when a guild has a
+#    working_channel configured, the bot only responds to commands in that
+#    channel and only sends its chatter there (option 3). No channel set ->
+#    behaves exactly like before (any channel).
+#  * is_admin (per-command check on admin commands): owner, or a member with
+#    the Administrator permission, or a member holding one of the guild's
+#    configured admin_roles.
+#
+# The config command itself is exempt from the working-channel gate (it's how
+# you set the channel), but it IS admin-gated.
+
+class NotInWorkingChannel(commands.CheckFailure):
+    pass
+
+
+class NotAdmin(commands.CheckFailure):
+    pass
+
+
+def is_admin(ctx: commands.Context) -> bool:
+    guild = ctx.guild
+    author = ctx.author
+    if guild is None or author is None:
+        raise NotAdmin
+    if author.id == guild.owner_id:
+        return True
+    if author.guild_permissions.administrator:
+        return True
+    author_roles = {r.id for r in author.roles}
+    if any(rid in author_roles for rid in CONFIG.admin_roles(guild.id)):
+        return True
+    raise NotAdmin
+
+
+def in_working_channel(ctx: commands.Context) -> bool:
+    # DMs and no per-guild channel configured -> anywhere is fine (legacy behaviour)
+    if ctx.guild is None:
+        return True
+    channel_id = CONFIG.working_channel(ctx.guild.id)
+    if channel_id is None:
+        return True
+    # the config command is exempt (it's how you set/change the channel) so an
+    # admin is never locked out of fixing a bad config from another channel.
+    if ctx.command is not None and ctx.command.qualified_name.split()[0] == 'config':
+        return True
+    if ctx.channel is not None and ctx.channel.id == channel_id:
+        return True
+    raise NotInWorkingChannel
+
+
+bot.check(in_working_channel)
+
+
+@bot.group(name='config', description="Admin: configure the bot for this server (prefix-only)")
+@commands.check(is_admin)
+async def config(ctx: commands.Context):
+    """Shows the bot's configuration for this server."""
+    wc = CONFIG.working_channel(ctx.guild.id)
+    wc_name = None
+    if wc is not None:
+        ch = ctx.guild.get_channel(wc)
+        wc_name = f"<#{wc}>" if ch is not None else f"(deleted channel {wc})"
+    roles = CONFIG.admin_roles(ctx.guild.id)
+    role_names = ", ".join(f"<@&{r}>" for r in roles) if roles else "(none — owner/admin only)"
+    await ctx.send(
+        f"**{ctx.guild.name}**\n"
+        f"Working channel: {wc_name or '(any channel)'}\n"
+        f"Admin roles: {role_names}"
+    )
+
+
+@config.command(name='setchannel', description="Set the channel the bot works in (option 3)")
+@commands.check(is_admin)
+async def config_setchannel(ctx: commands.Context):
+    """Sets the working channel to the one you're in."""
+    CONFIG.set_working_channel(ctx.guild.id, ctx.channel.id)
+    await ctx.send(f"Working channel set to {ctx.channel.mention}. I'll only respond there now.")
+
+
+@config.command(name='clearchannel', description="Clear the working channel (any channel again)")
+@commands.check(is_admin)
+async def config_clearchannel(ctx: commands.Context):
+    CONFIG.clear_working_channel(ctx.guild.id)
+    await ctx.send("Working channel cleared. I'll respond in any channel again.")
+
+
+@config.command(name='setadminrole', description="Add a role to the admin list")
+@commands.check(is_admin)
+async def config_setadminrole(ctx: commands.Context, role: discord.Role):
+    roles = CONFIG.admin_roles(ctx.guild.id)
+    if role.id not in roles:
+        roles.append(role.id)
+    CONFIG.set_admin_roles(ctx.guild.id, roles)
+    await ctx.send(f"Admin roles: {', '.join(f'<@&{r}>' for r in roles)}")
+
+
+@config.command(name='clearadminrole', description="Remove a role from the admin list")
+@commands.check(is_admin)
+async def config_clearadminrole(ctx: commands.Context, role: discord.Role):
+    roles = [r for r in CONFIG.admin_roles(ctx.guild.id) if r != role.id]
+    CONFIG.set_admin_roles(ctx.guild.id, roles)
+    await ctx.send(f"Admin roles: {', '.join(f'<@&{r}>' for r in roles) if roles else '(none — owner/admin only)'}")
+
 
 # Auto-leave empty voice channels.
 # If everyone leaves the bot's VC (or the bot is left alone), it stays for
@@ -875,6 +992,7 @@ async def help(ctx: commands.Context):
     "`shuffle`: Shuffles queue\n"
     "`clear`: Clears queue\n"
     "`disconnect [nikal, leave]:` Disconnect from voice channel\n"
+    "`config [setchannel, setadminrole ...]:` Admin: configure working channel + admin roles\n"
     "`fuckoff:` Don't do this.\n"
     "`help:` Shows this message"
 )
