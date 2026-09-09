@@ -14,8 +14,7 @@ from prefetch import PrefetchStream, PrefetchedFFmpegPCMAudio
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Also write to a per-run log file. On the host (no docker) that is
-# ~/annubot-deploy/logs/; the old /logs/annubot was a docker volume mount.
+# Also write to a per-run log file under ~/annubot-deploy/logs/.
 # Falls back to stderr-only if the dir can't be created.
 try:
     _log_dir = os.path.join(os.path.expanduser('~'), 'annubot-deploy', 'logs')
@@ -33,7 +32,7 @@ except Exception as e:
 import discord.opus as opus
 if not opus.is_loaded():
     _opus_candidates = [
-        '/usr/lib/x86_64-linux-gnu/libopus.so.0',  # Debian/Ubuntu (docker image)
+        '/usr/lib/x86_64-linux-gnu/libopus.so.0',  # Debian/Ubuntu multiarch
         '/usr/lib/libopus.so.0',                   # Arch / flat multiarch
         '/usr/lib64/libopus.so.0',                 # RHEL-family
         '/usr/local/lib/libopus.so.0',

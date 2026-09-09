@@ -46,13 +46,5 @@ YT_KEY = <your Youtube API v3 key>
 - You will also need the FFMPEG binary (not the python module) accessible through PATH in your respective OS.
 - *annubot.py* is the main runfile.
 
-**Alternatively**
-- You can use the Dockerfile to run annubot locally. You will need the .env file regardless ***in the same directory*** as the Dockerfile.
-- Run this code in a terminal:
-```
-docker build --no-cache --build-arg KEY=value -t annubot .
-docker run -e KEY=value --env-file .env annubot
-```
-
 ---
 **Jungle ka raja hota hai ek sher, jaldi karo pack up, ho gayi hai der…**
