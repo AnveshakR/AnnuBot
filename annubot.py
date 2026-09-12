@@ -512,7 +512,7 @@ async def _do_leave(guild, channel):
         logger.info(f"Empty VC in {guild} but music paused; staying in {channel}")
         return
     # nothing playing: safe to leave
-    logger.info(f"Empty VC in {guild} for {EMPTY_VC_LEAVE_DELAY}s, leaving {channel}")
+    logger.info(f"Empty VC in {guild} for {EMPTY_VC_LEAVE_DELAY}s, leaving")
     try:
         if guild.system_channel is not None:
             await guild.system_channel.send(f"Leaving {channel} — it's been empty for {EMPTY_VC_LEAVE_DELAY}s.")
@@ -536,7 +536,7 @@ async def on_voice_state_update(member, before, after):
         if task is not None and not task.done():
             task.cancel()
         if after.channel is not None and _empty_people(after.channel) == []:
-            logger.info(f"Bot in empty VC {after.channel}, leaving in {EMPTY_VC_LEAVE_DELAY}s")
+            logger.info(f"Bot in empty VC, leaving in {EMPTY_VC_LEAVE_DELAY}s")
             _leave_tasks[member.guild.id] = asyncio.create_task(_do_leave(member.guild, after.channel))
         return
 
@@ -564,7 +564,7 @@ async def on_voice_state_update(member, before, after):
         if _empty_people(bot_channel) == []:
             existing = _leave_tasks.get(member.guild.id)
             if existing is None or existing.done():
-                logger.info(f"VC {bot_channel} emptied, leaving in {EMPTY_VC_LEAVE_DELAY}s")
+                logger.info(f"VC emptied, leaving in {EMPTY_VC_LEAVE_DELAY}s")
                 _leave_tasks[member.guild.id] = asyncio.create_task(_do_leave(member.guild, bot_channel))
 
 @bot.hybrid_command(name='join', description="Joins your voice channel", aliases=['connect'], pass_context=True)
