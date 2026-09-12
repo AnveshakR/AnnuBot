@@ -10,6 +10,8 @@ from discord.ext import commands
 import queue
 import logging
 import time
+import json
+import tempfile
 from prefetch import PrefetchStream, PrefetchedFFmpegPCMAudio
 
 logging.basicConfig(level=logging.INFO)
@@ -81,7 +83,12 @@ async def audiostream(url, *, loop=None, stream=True, start=0.0):
     ydl_opts = dict(yt_dlp_opts)
     ydl_opts['format'] = 'bestaudio'
     try:
-        data = await loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=False))
+        data = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=False)),
+            timeout=EXTRACT_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.error(f"yt-dlp extract timed out after {EXTRACT_TIMEOUT:.0f}s for {url}; skipping song")
+        return None
     except Exception as e:
         logger.error(f"yt-dlp extract failed: {e}")
         return None
@@ -188,6 +195,21 @@ MIN_RESUME_POS = 3.0
 # We treat it as a resumable break instead of advancing the queue.
 TAIL_TOLERANCE = 5.0
 
+# Hard ceiling on a single yt-dlp extract_info() call. yt_dlp_opts'
+# socket_timeout covers socket reads, but NOT DNS resolution or some TLS
+# handshake paths — a hung call there blocks the executor thread forever,
+# holds play_lock, and freezes the whole queue (the Sept 11 19:35 freeze).
+# asyncio.wait_for cancels the coroutine on expiry; the orphaned executor
+# thread is abandoned (harmless — it holds no lock, only a stuck socket).
+EXTRACT_TIMEOUT = 60.0
+
+# Max seconds play_next_song will wait for the current player to report
+# "not playing / not paused" before forcing an advance. Catches a player that
+# desyncs (stuck in a recovery, or a stale after-callback) so it can't hold
+# play_lock forever. Generous: a normal song end is near-instant; a stuck one
+# is indefinite. 120s is well beyond any legitimate "waiting for voice".
+PLAY_WAIT_TIMEOUT = 120.0
+
 intents = discord.Intents.default()
 intents.message_content = True
 
@@ -203,11 +225,58 @@ class GuildQueue:
     # keeps track of object instances per guild
     instances = {}
 
+    # Persistent queue file, OUTSIDE the reset deploy checkout (same stable
+    # state dir as config.json, derived from ANNUBOT_CONFIG_PATH's directory).
+    # Survives `git reset --hard` and bot restarts, so a crash/restart no
+    # longer wipes the queue. Format: {"<guild_id>": [[query, is_video_id], ...]}
+    _queue_path = os.environ.get(
+        'ANNUBOT_QUEUE_PATH',
+        os.path.join(
+            os.path.dirname(os.path.abspath(os.environ.get('ANNUBOT_CONFIG_PATH', 'config.json'))),
+            'queue.json'))
+
     def __init__(self, guild_id):
         self.guild_queue = queue.Queue(-1)
         self.guild_id = guild_id
         self.play_lock = asyncio.Lock()
         GuildQueue.instances[guild_id] = self
+        self._load()
+
+    # ---- persistence -------------------------------------------------------
+    def _load(self):
+        """Restore this guild's queue from the persistent file (if any)."""
+        try:
+            with open(self._queue_path, encoding='utf-8') as f:
+                data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return  # no saved queue (or corrupt) -> start empty
+        if not isinstance(data, dict):
+            return
+        for entry in data.get(str(self.guild_id), []):
+            try:
+                query, is_video_id = entry[0], bool(entry[1])
+            except (IndexError, TypeError):
+                continue
+            self.guild_queue.put((query, is_video_id))
+        if not self.guild_queue.empty():
+            logger.info(f"Restored {self.guild_queue.qsize()} songs for guild {self.guild_id} from {self._queue_path}")
+
+    def _save(self):
+        """Atomically persist ALL guilds' queues (in-memory + this file)."""
+        data = {}
+        for gid, q in GuildQueue.instances.items():
+            if not q.is_queue_empty():
+                data[str(gid)] = [[item[0], bool(item[1])] for item in q.display_queue()]
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(self._queue_path)), exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(self._queue_path)),
+                                       prefix='.queue-', suffix='.tmp')
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, self._queue_path)
+        except OSError as e:
+            logger.warning(f"queue save failed: {e}")
+
 
     # check if the guild id has an associated queue object
     @classmethod
@@ -220,12 +289,15 @@ class GuildQueue:
 
     # adds item to bottom of queue
     def put_in_queue(self, song):
-        return self.guild_queue.put(song)
+        self.guild_queue.put(song)
+        self._save()
 
     # pulls item from top of queue
     def get_latest_from_queue(self):
         if not self.is_queue_empty():
-            return self.guild_queue.get()
+            item = self.guild_queue.get()
+            self._save()
+            return item
         else:
             return None
 
@@ -246,6 +318,7 @@ class GuildQueue:
             # put items from list into queue
             for item in shuffled_list:
                 self.guild_queue.put(item)
+            self._save()
             return True
         else:
             return None
@@ -254,6 +327,7 @@ class GuildQueue:
     def clearqueue(self):
         if not self.is_queue_empty():
             self.guild_queue = queue.Queue(-1)
+            self._save()
             return True
         else:
             return None
@@ -405,6 +479,9 @@ async def config_clearadminrole(ctx: commands.Context, role: discord.Role):
 # a member (re)joining the bot's VC cancels the pending leave.
 EMPTY_VC_LEAVE_DELAY = 30  # seconds
 _leave_tasks = {}  # guild_id -> pending auto-leave Task
+# guild_ids whose playback was paused BY AUTO-LEAVE (not by the user). On
+# re-join we resume only these — a user's manual pause is left alone.
+_autopaused = set()
 
 
 def _empty_people(channel):
@@ -415,15 +492,33 @@ def _empty_people(channel):
 async def _do_leave(guild, channel):
     await asyncio.sleep(EMPTY_VC_LEAVE_DELAY)
     vc = discord.utils.get(bot.voice_clients, guild=guild)
-    # only leave if we're still in the same channel and it's still empty
-    if vc is not None and vc.channel is channel and _empty_people(channel) == []:
-        logger.info(f"Empty VC in {guild} for {EMPTY_VC_LEAVE_DELAY}s, leaving {channel}")
-        try:
-            if guild.system_channel is not None:
-                await guild.system_channel.send(f"Leaving {channel} — it's been empty for {EMPTY_VC_LEAVE_DELAY}s.")
-        except Exception:
-            pass  # no perms / channel gone; leave anyway
-        await vc.disconnect()
+    # only act if we're still in the same channel and it's still empty
+    if vc is None or vc.channel is not channel or _empty_people(channel) != []:
+        return
+    # If music is active, do NOT disconnect. disconnect() -> stop() kills the
+    # player, which fires on_finished() -> play_next_song(), eating the NEXT
+    # song from the queue (two songs lost, stream broken). Instead: pause (if
+    # playing) and stay in the VC; playback resumes when someone re-joins.
+    if vc.is_playing():
+        vc.pause()
+        st = _states.get(guild.id)
+        if st is not None:
+            st.pos.pause()  # freeze position so resume recovers the right second
+        _autopaused.add(guild.id)
+        logger.info(f"Empty VC in {guild} but music playing; paused, staying in {channel}")
+        return
+    if vc.is_paused():
+        # user manually paused; stay, don't touch the pause (no auto-resume)
+        logger.info(f"Empty VC in {guild} but music paused; staying in {channel}")
+        return
+    # nothing playing: safe to leave
+    logger.info(f"Empty VC in {guild} for {EMPTY_VC_LEAVE_DELAY}s, leaving {channel}")
+    try:
+        if guild.system_channel is not None:
+            await guild.system_channel.send(f"Leaving {channel} — it's been empty for {EMPTY_VC_LEAVE_DELAY}s.")
+    except Exception:
+        pass  # no perms / channel gone; leave anyway
+    await vc.disconnect()
 
 
 @bot.event
@@ -451,6 +546,17 @@ async def on_voice_state_update(member, before, after):
         if task is not None and not task.done():
             task.cancel()
             logger.info(f"Auto-leave cancelled: someone joined {bot_channel}")
+        # If auto-leave paused the music (everyone left while it played),
+        # resume it now that someone is back. Only auto-paused guilds — a
+        # user's manual pause is left for them to resume.
+        if member.guild.id in _autopaused:
+            _autopaused.discard(member.guild.id)
+            if bot_channel.is_paused():
+                logger.info(f"Resuming auto-paused music: someone joined {bot_channel}")
+                bot_channel.resume()
+                st = _states.get(member.guild.id)
+                if st is not None:
+                    st.pos.resume()
         return
 
     # a non-bot member left the bot's channel -> maybe start the countdown
@@ -535,11 +641,14 @@ async def play(ctx: commands.Context, *, query=None):
     if connect_flag:
         # if connection succeeds then searches if the guild already has an active queue
         if not GuildQueue.exists(ctx.guild.id):
-            # if not then creates a queue and registers it
+            # if not then creates a queue and registers it. __init__ may RESTORE
+            # a previously-saved queue (persistence), so "no query" can now mean
+            # "resume the saved queue" rather than "you forgot the song".
             Queue_Object = GuildQueue(ctx.guild.id)
-            # if there is nothing in queue and play command is given without query then error out
             if query is None or query.strip() == "":
-                return await ctx.send("No query given!")
+                if Queue_Object.is_queue_empty():
+                    return await ctx.send("No query given!")
+                return await play_next_song(ctx)  # restored queue: resume it
         else:
             # if yes then initialise the variable to it
             Queue_Object = GuildQueue.instances[ctx.guild.id]
@@ -730,7 +839,12 @@ async def play_next_song(ctx: commands.Context):
     Queue_Object = GuildQueue.instances[ctx.guild.id]
 
     async with Queue_Object.play_lock:
-        # wait for current song to finish with timeout and disconnect check
+        # wait for current song to finish, with a real safety timeout and a
+        # disconnect check. The timeout was previously a comment with no code:
+        # if the player desyncs (reports playing/paused forever) or a stale
+        # after-callback stalls, this loop held play_lock indefinitely and the
+        # whole queue froze. Now it gives up after PLAY_WAIT_TIMEOUT seconds.
+        waited = 0.0
         while True:
             try:
                 if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
@@ -739,8 +853,10 @@ async def play_next_song(ctx: commands.Context):
             except (discord.ClientException, AttributeError):
                 # voice client disconnected or became invalid
                 break
-            # safety timeout - if we've been waiting too long, break out
-            # (song is likely stuck or errored silently)
+            waited += 1.0
+            if waited >= PLAY_WAIT_TIMEOUT:
+                logger.error("play_next_song: player still active after %.0fs; forcing advance", waited)
+                break
 
         # Bounded loop: keep advancing while songs fail to resolve (the old
         # recursive play_audio -> play_next_song call deadlocked here on a
