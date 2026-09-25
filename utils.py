@@ -55,7 +55,7 @@ def ytvideolistnames(video_ids) -> list:
             names.append(item['snippet']['title'])
         return names
     except Exception as e:
-        logger.error(f"ytvideolistnames failed: {e}")
+        logger.error(f"ytvideolistnames failed: {type(e).__name__}: {_redact(e)}")
         return [f"Video {vid}" for vid in video_ids]
 
 def format_duration(iso: str) -> str:
@@ -78,27 +78,70 @@ def format_duration(iso: str) -> str:
 
 
 # get video info from YouTube API
+def _redact(text) -> str:
+    # request URLs (and so requests' exception messages) carry the API key
+    text = str(text)
+    return text.replace(YT_KEY, '<YT_KEY>') if YT_KEY else text
+
+
+def _yt_api_get(endpoint, params, what):
+    """GET a YouTube Data API endpoint and return the parsed JSON, or None.
+
+    Never raises: a network error, non-JSON body or API error (quota exceeded,
+    bad key, ...) is logged with the API's own error message and returns None.
+    """
+    try:
+        r = requests.get(f'https://youtube.googleapis.com/youtube/v3/{endpoint}',
+                         params={**params, 'key': YT_KEY}, timeout=10)
+    except Exception as e:
+        logger.error(f"ytpull {what}: request failed: {type(e).__name__}: {_redact(e)}")
+        return None
+    try:
+        body = r.json()
+    except Exception as e:
+        logger.error(f"ytpull {what}: HTTP {r.status_code}, unparseable body ({e}): {r.text[:500]!r}")
+        return None
+    if r.status_code != 200 or 'error' in body:
+        err = body.get('error', {}) if isinstance(body, dict) else {}
+        reasons = [x.get('reason') for x in err.get('errors', []) if isinstance(x, dict)]
+        logger.error(f"ytpull {what}: HTTP {r.status_code}, API error {err.get('code')} "
+                     f"{err.get('message')!r} reasons={reasons}")
+        return None
+    logger.debug(f"ytpull {what}: HTTP {r.status_code}, {len(body.get('items') or [])} items")
+    return body
+
+
+# Returns (link, formatted duration), or (None, None) if the song can't be
+# resolved. Never raises: an exception here used to kill queue advancement.
 def ytpull(query, is_video_id=False):
     # search for song by song ID if query is not a valid youtube ID
     if not is_video_id:
         # get video info for first search result
-        get_video_id = requests.get('https://youtube.googleapis.com/youtube/v3/search?q={}&key={}'.format(query+" explicit audio", YT_KEY), timeout=10)
-        try:
-            query = get_video_id.json()['items'][0]['id']['videoId'] # change query to youtube ID
-        except (KeyError, IndexError, Exception) as e:
-            logger.error(f"ytpull search failed: {e}")
+        body = _yt_api_get('search', {'q': query + " explicit audio"}, f"search {query!r}")
+        if body is None:
             return None, None
+        try:
+            query = body['items'][0]['id']['videoId'] # change query to youtube ID
+        except (KeyError, IndexError, TypeError) as e:
+            logger.error(f"ytpull search {query!r}: no usable result ({type(e).__name__}: {e}); items={body.get('items')!r:.500}")
+            return None, None
+        logger.debug(f"ytpull search resolved to video {query}")
 
     # get video info from video_id
-    get_video_details = requests.get('https://youtube.googleapis.com/youtube/v3/videos?part=contentDetails&id={}&key={}'.format(query, YT_KEY), timeout=10)
-    try:
-        video_data = get_video_details.json()
-    except Exception as e:
-        logger.error(f"ytpull details failed: {e}")
+    video_data = _yt_api_get('videos', {'part': 'contentDetails', 'id': query}, f"details {query}")
+    if video_data is None:
         return None, None
-
-    link = ytbase + video_data['items'][0]['id'] # video link
-    video_length = video_data['items'][0]['contentDetails']['duration'] # playtime
+    items = video_data.get('items') or []
+    if not items:
+        # deleted, private or region-blocked videos are silently omitted
+        logger.error(f"ytpull details {query}: video not returned by the API (deleted, private or blocked?)")
+        return None, None
+    try:
+        link = ytbase + items[0]['id'] # video link
+        video_length = items[0]['contentDetails']['duration'] # playtime
+    except (KeyError, TypeError) as e:
+        logger.error(f"ytpull details {query}: malformed item ({type(e).__name__}: {e}): {items[0]!r:.500}")
+        return None, None
     time = format_duration(video_length)
     return link, time
 

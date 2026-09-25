@@ -14,7 +14,35 @@ import json
 import tempfile
 from prefetch import PrefetchStream, PrefetchedFFmpegPCMAudio
 
-logging.basicConfig(level=logging.INFO)
+import sys
+import threading
+
+# --- logging ----------------------------------------------------------------
+# Verbose by default: our own modules and discord's voice/player internals log
+# at DEBUG, with thread + function:line on every record, so a silent stall
+# (like the Sept 24 21:51 one) leaves a trail.
+#
+#   ANNUBOT_LOG_LEVEL=INFO    quieter bot logs (default DEBUG)
+#   ANNUBOT_DISCORD_DEBUG=1   also put discord.gateway/http/client at DEBUG.
+#                             Off by default: that logs every gateway payload,
+#                             including message contents, and is very noisy.
+#
+# urllib3 stays at INFO on purpose: at DEBUG it logs full request URLs, which
+# carry the YouTube API key.
+#
+# force=True: utils.py calls basicConfig(INFO) at import time (it's imported
+# above), which would otherwise make this call a silent no-op.
+_LOG_LEVEL = getattr(logging, os.environ.get('ANNUBOT_LOG_LEVEL', 'DEBUG').upper(), logging.DEBUG)
+_LOG_FORMAT = ('%(asctime)s.%(msecs)03d [%(levelname)s] %(name)s '
+               '[%(threadName)s] %(funcName)s:%(lineno)d: %(message)s')
+_LOG_DATEFMT = '%Y-%m-%d %H:%M:%S'
+logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, datefmt=_LOG_DATEFMT, force=True)
+for _name in ('__main__', 'annubot', 'utils', 'prefetch', 'config', 'yt_dlp',
+              'discord.voice_state', 'discord.voice_client', 'discord.player'):
+    logging.getLogger(_name).setLevel(_LOG_LEVEL)
+if os.environ.get('ANNUBOT_DISCORD_DEBUG') == '1':
+    logging.getLogger('discord').setLevel(logging.DEBUG)
+logging.getLogger('urllib3').setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Also write to a per-run log file under ~/annubot-deploy/logs/.
@@ -24,11 +52,38 @@ try:
     os.makedirs(_log_dir, exist_ok=True)
     _log_path = os.path.join(_log_dir, f'logs-{int(time.time())}.log')
     _fh = logging.FileHandler(_log_path)
-    _fh.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s'))
+    _fh.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATEFMT))
     logging.getLogger().addHandler(_fh)
-    logger.info(f"Logging to {_log_path}")
+    logger.info(f"Logging to {_log_path} (bot level {logging.getLevelName(_LOG_LEVEL)})")
 except Exception as e:
     logger.warning(f"File log unavailable ({e}); using stderr only")
+
+
+# Nothing should die without a traceback in the log: uncaught exceptions in the
+# main thread, in worker threads (prefetch pump, discord's audio player), and
+# in asyncio callbacks/tasks nobody awaited.
+def _log_uncaught(exc_type, exc, tb):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc, tb)
+        return
+    logger.critical("uncaught exception", exc_info=(exc_type, exc, tb))
+
+
+def _log_thread_exception(args):
+    logger.critical("uncaught exception in thread %s",
+                    args.thread.name if args.thread else '?',
+                    exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+
+
+def _log_loop_exception(loop, context):
+    exc = context.get('exception')
+    logger.error("asyncio: %s | context=%r", context.get('message', 'unhandled exception'),
+                 {k: v for k, v in context.items() if k not in ('message', 'exception')},
+                 exc_info=(type(exc), exc, exc.__traceback__) if exc else None)
+
+
+sys.excepthook = _log_uncaught
+threading.excepthook = _log_thread_exception
 
 # Fix: load libopus directly since the symlink may be missing.
 # Try the common distro locations (Debian/Ubuntu multiarch vs Arch/flat /usr/lib).
@@ -63,8 +118,11 @@ with open(filepath, encoding='utf8') as fp:
 
 yt_dlp_opts = {
     'quiet': True,
-    'no_warnings': True,
     'socket_timeout': 30,
+    # Route all yt-dlp output (debug/info/warnings/errors) into our log instead
+    # of stdout or nowhere; 'verbose' adds its [debug] lines.
+    'logger': logging.getLogger('yt_dlp'),
+    'verbose': _LOG_LEVEL <= logging.DEBUG,
 }
 
 # NOTE: ffmpeg no longer reads the network directly. The signed googlevideo URL
@@ -82,6 +140,8 @@ async def audiostream(url, *, loop=None, stream=True, start=0.0):
     loop = loop or asyncio.get_event_loop()
     ydl_opts = dict(yt_dlp_opts)
     ydl_opts['format'] = 'bestaudio'
+    logger.debug("yt-dlp extract start: %s (start=%.1fs)", url, start)
+    t0 = time.monotonic()
     try:
         data = await asyncio.wait_for(
             loop.run_in_executor(None, lambda: yt_dlp.YoutubeDL(ydl_opts).extract_info(url, download=False)),
@@ -90,13 +150,24 @@ async def audiostream(url, *, loop=None, stream=True, start=0.0):
         logger.error(f"yt-dlp extract timed out after {EXTRACT_TIMEOUT:.0f}s for {url}; skipping song")
         return None
     except Exception as e:
-        logger.error(f"yt-dlp extract failed: {e}")
+        logger.exception(f"yt-dlp extract failed for {url}: {e}")
+        return None
+    if data is None:
+        logger.error("yt-dlp returned no data for %s", url)
         return None
     if 'entries' in data:
-        data = data['entries'][0]
+        entries = [e for e in (data.get('entries') or []) if e]
+        if not entries:
+            logger.error("yt-dlp returned an empty entry list for %s", url)
+            return None
+        data = entries[0]
     stream_url = data.get('url') if stream else None
+    logger.debug("yt-dlp extract done in %.1fs: id=%s title=%r duration=%s format=%s acodec=%s abr=%s filesize=%s",
+                 time.monotonic() - t0, data.get('id'), data.get('title'), data.get('duration'),
+                 data.get('format_id'), data.get('acodec'), data.get('abr'),
+                 data.get('filesize') or data.get('filesize_approx'))
     if not stream_url:
-        logger.error("No stream URL found in yt-dlp result")
+        logger.error("No stream URL found in yt-dlp result for %s", url)
         return None
 
     def _refresh():
@@ -107,7 +178,8 @@ async def audiostream(url, *, loop=None, stream=True, start=0.0):
             d = d['entries'][0]
         return d.get('url')
 
-    src = PrefetchStream(stream_url, headers=data.get('http_headers'), refresh=_refresh)
+    src = PrefetchStream(stream_url, headers=data.get('http_headers'), refresh=_refresh,
+                         label=data.get('id') or url)
     before = f'-ss {start:.3f}' if (start and start > 0) else None
     return (PrefetchedFFmpegPCMAudio(src, before_options=before, options='-vn'), data)
 
@@ -248,8 +320,12 @@ class GuildQueue:
         try:
             with open(self._queue_path, encoding='utf-8') as f:
                 data = json.load(f)
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return  # no saved queue (or corrupt) -> start empty
+        except FileNotFoundError:
+            logger.debug("no saved queue at %s", self._queue_path)
+            return
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("saved queue %s unreadable (%s); starting empty", self._queue_path, e)
+            return  # corrupt -> start empty
         if not isinstance(data, dict):
             return
         for entry in data.get(str(self.guild_id), []):
@@ -276,6 +352,8 @@ class GuildQueue:
             os.replace(tmp, self._queue_path)
         except OSError as e:
             logger.warning(f"queue save failed: {e}")
+            return
+        logger.debug("queue saved: %s", {gid: len(v) for gid, v in data.items()})
 
 
     # check if the guild id has an associated queue object
@@ -290,12 +368,14 @@ class GuildQueue:
     # adds item to bottom of queue
     def put_in_queue(self, song):
         self.guild_queue.put(song)
+        logger.debug("guild %s: queued %r (now %d)", self.guild_id, song, self.guild_queue.qsize())
         self._save()
 
     # pulls item from top of queue
     def get_latest_from_queue(self):
         if not self.is_queue_empty():
             item = self.guild_queue.get()
+            logger.debug("guild %s: dequeued %r (%d left)", self.guild_id, item, self.guild_queue.qsize())
             self._save()
             return item
         else:
@@ -338,10 +418,37 @@ async def on_ready():
     # Bot presence
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.listening, name="annu help"))
     await bot.tree.sync()
+    asyncio.get_running_loop().set_exception_handler(_log_loop_exception)
     logger.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
 
 @bot.event
+async def on_disconnect():
+    logger.warning("gateway disconnected")
+
+@bot.event
+async def on_resumed():
+    logger.debug("gateway session resumed")
+
+@bot.event
+async def on_command(ctx):
+    vc = ctx.voice_client
+    logger.info("command %r from user %s in guild %s: args=%r kwargs=%r (vc connected=%s playing=%s paused=%s)",
+                ctx.command.qualified_name if ctx.command else None,
+                ctx.author.id if ctx.author else None,
+                ctx.guild.id if ctx.guild else None,
+                ctx.args[2:] if len(ctx.args) > 2 else [], ctx.kwargs,
+                vc.is_connected() if vc else None,
+                vc.is_playing() if vc else None,
+                vc.is_paused() if vc else None)
+
+@bot.event
+async def on_command_completion(ctx):
+    logger.debug("command %r completed", ctx.command.qualified_name if ctx.command else None)
+
+@bot.event
 async def on_command_error(ctx, error):
+    logger.debug("command %r raised %s: %s", ctx.command.qualified_name if ctx.command else None,
+                 type(error).__name__, error)
     if isinstance(error, commands.CommandOnCooldown):
         await ctx.send(f"Try again in {error.retry_after:.1f}s.")
     elif isinstance(error, commands.MissingRequiredArgument):
@@ -523,6 +630,10 @@ async def _do_leave(guild, channel):
 
 @bot.event
 async def on_voice_state_update(member, before, after):
+    logger.debug("voice state update in guild %s: member %s%s channel %s -> %s",
+                 getattr(member.guild, 'id', None), getattr(member, 'id', None),
+                 " (bot itself)" if member == bot.user else "",
+                 getattr(before.channel, 'id', None), getattr(after.channel, 'id', None))
     vc = discord.utils.get(bot.voice_clients, guild=member.guild)
     if vc is None or vc.channel is None:
         return
@@ -676,7 +787,11 @@ async def play_audio(ctx: commands.Context, query, is_video_id):
     # asyncio.Lock is not re-entrant — the old recursive call deadlocked the
     # whole queue on the first "not found" song (freeze: nothing could
     # pause/resume/skip).
-    url, time = ytpull(query, is_video_id)
+    logger.info("play_audio: guild %s, query=%r is_video_id=%s", ctx.guild.id, query, is_video_id)
+    # ytpull does blocking HTTP (up to 2x10s); keep it off the event loop so
+    # voice heartbeats and commands keep running meanwhile.
+    url, time = await asyncio.to_thread(ytpull, query, is_video_id)
+    logger.debug("play_audio: ytpull -> url=%s duration=%s", url, time)
     if url is None:
         await ctx.send(f"{ytvideolistnames([query])[0] if is_video_id else query} not found, skipping to next song")
         return False
@@ -691,7 +806,7 @@ async def play_audio(ctx: commands.Context, query, is_video_id):
     # shows raw markdown), and invisible chars are zero-width (nothing to click).
     # A single "_" renders literally (italic needs a _pair_) and stays clickable.
     title = clean_title(data.get('title'), fallback="_")
-    ytid = data['id']
+    ytid = data.get('id') or query
 
     # per-song state: position clock + recovery retry count + generation guard.
     # Bumping the generation here (and in skip/play) invalidates any in-flight
@@ -714,6 +829,9 @@ async def play_audio(ctx: commands.Context, query, is_video_id):
         # guard lives on the *starting* side (skip/play bump it before stopping
         # the old player, so the old player's callback no-ops, not this one).
         st = _states.get(ctx.guild.id)
+        logger.debug("on_finished for %s (gen %d, current gen %s, pos %.1fs of %ss)",
+                     ytid, gen, st.generation if st else None,
+                     st.pos.seconds() if st else -1.0, data.get('duration'))
         if st is not None and st.generation == gen:
             dur = data.get('duration')
             pos = st.pos.seconds()
@@ -742,10 +860,14 @@ async def play_audio(ctx: commands.Context, query, is_video_id):
         # Range requests), so -ss <pos> lands directly with no download-from-0
         # penalty and no temp file.
         st = _states.get(ctx.guild.id)
+        logger.debug("on_stream_error for %s (gen %d, current gen %s, count_retry=%s): %r",
+                     ytid, gen, st.generation if st else None, count_retry, error)
         if st is None or st.generation != gen:
+            logger.debug("on_stream_error for %s: superseded, ignoring", ytid)
             return  # a user action (skip/play) superseded this song
         vc = ctx.voice_client
         if vc is None:
+            logger.warning("on_stream_error for %s: no voice client, not resuming", ytid)
             return
         if not vc.is_connected():
             # Voice dropped, not the stream. Wait for voice auto-reconnect
@@ -821,24 +943,55 @@ async def play_audio(ctx: commands.Context, query, is_video_id):
     def _make_after(ctx, gen, on_finished, on_stream_error):
         def after(error):
             # Called from the audio-player thread; hop onto the event loop.
+            st = _states.get(ctx.guild.id)
+            logger.debug("after-callback for %s (gen %d, pos %.1fs): error=%r",
+                         ytid, gen, st.pos.seconds() if st else -1.0, error)
             coro = on_finished() if error is None else on_stream_error(error)
             try:
-                asyncio.run_coroutine_threadsafe(coro, bot.loop)
+                fut = asyncio.run_coroutine_threadsafe(coro, bot.loop)
             except Exception:
                 logger.exception("failed to schedule after-callback")
+                coro.close()
+                return
+            # Nobody awaits this future, so an exception raised while advancing
+            # the queue used to vanish without a trace and playback just
+            # stopped (Sept 24 21:51). Always log it.
+            fut.add_done_callback(_log_after_result)
         return after
 
+    def _log_after_result(fut):
+        if fut.cancelled():
+            logger.warning("after-callback for %s was cancelled", ytid)
+            return
+        exc = fut.exception()
+        if exc is not None:
+            logger.error("after-callback for %s raised; queue may have stalled", ytid,
+                         exc_info=(type(exc), exc, exc.__traceback__))
+
+    logger.info("starting playback of %s %r [%s] (gen %d)", ytid, title, time, gen)
     ctx.voice_client.play(source[0], after=_make_after(ctx, gen, on_finished, on_stream_error))
-    playerembed.set_image(url=data['thumbnail'])
-    playerembed.description = f"[{title}]({ytbase}{ytid}) [{time}]"
-    await ctx.send(content=None, embed=playerembed)
+    # The song is playing from here on: a failure to post the embed must not
+    # propagate, or play_next_song would treat the song as failed and try to
+    # start another one on top of it.
+    try:
+        playerembed.set_image(url=data.get('thumbnail'))
+        playerembed.description = f"[{title}]({ytbase}{ytid}) [{time}]"
+        await ctx.send(content=None, embed=playerembed)
+    except Exception:
+        logger.exception("failed to send now-playing embed for %s (playback continues)", ytid)
     return True
 
 async def play_next_song(ctx: commands.Context):
     # plays next song if available in that guild's queue
     Queue_Object = GuildQueue.instances[ctx.guild.id]
+    logger.debug("play_next_song: guild %s, %d queued, lock %s",
+                 ctx.guild.id, Queue_Object.guild_queue.qsize(),
+                 "held (waiting)" if Queue_Object.play_lock.locked() else "free")
+    lock_t0 = asyncio.get_running_loop().time()
 
     async with Queue_Object.play_lock:
+        logger.debug("play_next_song: acquired play_lock after %.1fs",
+                     asyncio.get_running_loop().time() - lock_t0)
         # wait for current song to finish, with a real safety timeout and a
         # disconnect check. The timeout was previously a comment with no code:
         # if the player desyncs (reports playing/paused forever) or a stale
@@ -857,6 +1010,8 @@ async def play_next_song(ctx: commands.Context):
             if waited >= PLAY_WAIT_TIMEOUT:
                 logger.error("play_next_song: player still active after %.0fs; forcing advance", waited)
                 break
+        if waited:
+            logger.debug("play_next_song: waited %.0fs for the previous player to stop", waited)
 
         # Bounded loop: keep advancing while songs fail to resolve (the old
         # recursive play_audio -> play_next_song call deadlocked here on a
@@ -864,14 +1019,40 @@ async def play_next_song(ctx: commands.Context):
         # actually starts playing returns True and ends the loop; an empty
         # queue ends it too.
         while True:
+            vc = ctx.voice_client
+            if vc is None or not vc.is_connected():
+                # Don't pop (and lose) songs we have nowhere to play.
+                logger.warning("play_next_song: not connected to voice in guild %s; %d songs stay queued",
+                               ctx.guild.id, Queue_Object.guild_queue.qsize())
+                return
             if Queue_Object.is_queue_empty():
                 # if end of queue is reached
+                logger.info("play_next_song: end of queue in guild %s", ctx.guild.id)
                 await ctx.send("End of queue reached!")
                 return
             # gets latest song from queue and plays
             query, is_video_id = Queue_Object.get_latest_from_queue()
-            if await play_audio(ctx, query, is_video_id):
+            try:
+                started = await play_audio(ctx, query, is_video_id)
+            except Exception as e:
+                # Any unexpected failure on one song (bad API response, deleted
+                # video, Discord hiccup) skips that song instead of silently
+                # ending playback for the whole queue.
+                logger.exception("play_next_song: failed to play %r; skipping to next song", query)
+                try:
+                    await ctx.send(f"Couldn't play `{query}` ({type(e).__name__}), skipping to next song")
+                except Exception:
+                    logger.exception("play_next_song: couldn't send the skip notice")
+                vc = ctx.voice_client
+                if vc is not None and (vc.is_playing() or vc.is_paused()):
+                    # something is playing despite the error; don't stack another song on it
+                    logger.warning("play_next_song: player active after failure; not advancing further")
+                    return
+                started = False
+            if started:
                 return
+            logger.info("play_next_song: %r did not start; trying the next song (%d left)",
+                        query, Queue_Object.guild_queue.qsize())
 
 # pauses music
 @bot.hybrid_command(name='pause', description="Pauses playback", aliases=['ruk'], pass_context=True)
@@ -1115,4 +1296,6 @@ async def help(ctx: commands.Context):
     await ctx.send(embed=helpembed)
 
 if __name__ == '__main__':
-    bot.run(DISCORD_TOKEN)
+    # log_handler=None: logging is configured above. discord.py's own handler
+    # would duplicate every discord.* line in a second format.
+    bot.run(DISCORD_TOKEN, log_handler=None)
