@@ -622,7 +622,7 @@ async def _do_leave(guild, channel):
     logger.info(f"Empty VC in {guild} for {EMPTY_VC_LEAVE_DELAY}s, leaving")
     try:
         if guild.system_channel is not None:
-            await guild.system_channel.send(f"Leaving {channel} — it's been empty for {EMPTY_VC_LEAVE_DELAY}s.")
+            await guild.system_channel.send(f"Leaving — it's been empty for {EMPTY_VC_LEAVE_DELAY}s.")
     except Exception:
         pass  # no perms / channel gone; leave anyway
     await vc.disconnect()
@@ -727,7 +727,7 @@ async def dc(ctx: commands.Context):
 
     # if author and bot are in same VC
     elif ctx.author.voice.channel == bot_voice.channel:
-        await ctx.send(f"Leaving {bot_voice.channel}!")
+        await ctx.send("Leaving!")
         await bot_voice.disconnect()
 
     # if author and bot are in different VCs
