@@ -19,6 +19,14 @@ SPOTIFY_SECRET = os.getenv('SPOTIFY_SECRET')
 APPLE_MUSIC_TEAM_ID = os.getenv('APPLE_MUSIC_TEAM_ID')
 APPLE_MUSIC_KEY_ID = os.getenv('APPLE_MUSIC_KEY_ID')
 APPLE_MUSIC_PRIVATE_KEY_PATH = os.getenv('APPLE_MUSIC_PRIVATE_KEY_PATH')
+# Optional Netscape-format cookies file (exported from a signed-in, age-verified
+# YouTube/Google account) used ONLY as a fallback when the Data API search
+# returns zero results. Some queries (e.g. containing certain flagged words)
+# are age-gated by YouTube and silently return empty results to unauthenticated
+# callers (API key or anonymous yt-dlp) instead of an age-confirmation prompt;
+# an authenticated session bypasses this. Never committed — lives outside the
+# repo checkout, path supplied via env only. Feature is a no-op if unset.
+YT_COOKIES_FILE = os.getenv('ANNUBOT_YT_COOKIES')
 
 auth_url = 'https://accounts.spotify.com/api/token'
 ytbase = "https://www.youtube.com/watch?v="
@@ -116,6 +124,53 @@ def _yt_api_get(endpoint, params, what):
     return body
 
 
+# Fallback search via yt-dlp's own YouTube search (bypasses the Data API
+# entirely), using an authenticated cookies file if one is configured.
+#
+# Why this exists: some search queries (e.g. containing certain flagged
+# words) are age-gated by YouTube. An anonymous/unauthenticated search
+# (Data API key, or yt-dlp with no cookies) gets silently served ZERO
+# results instead of an age-confirmation prompt, even though the video
+# exists, is public, and is trivially findable by a logged-in, age-verified
+# browser session. Passing cookies from such a session reproduces that and
+# recovers the real result. If YT_COOKIES_FILE isn't configured this is a
+# no-op (returns None) and callers fall through to the existing "not found"
+# path exactly as before — no behavior change for anyone without cookies set up.
+def _ytdlp_search_fallback(query, what):
+    if not YT_COOKIES_FILE:
+        return None
+    try:
+        import yt_dlp
+    except ImportError:
+        logger.error(f"ytpull {what}: yt-dlp fallback unavailable (import failed)")
+        return None
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'skip_download': True,
+        'extract_flat': 'in_playlist',
+        'default_search': 'ytsearch5',
+        'noplaylist': True,
+        'cookiefile': YT_COOKIES_FILE,
+    }
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(query, download=False)
+        entries = (info or {}).get('entries') or []
+        for e in entries:
+            vid = e.get('id')
+            # extract_flat entries are a mix of videos/playlists/channels;
+            # only a video has an 11-char YouTube ID shaped like this.
+            if vid and e.get('_type', 'url') in ('url', None) and len(vid) == 11:
+                logger.info(f"ytpull {what}: yt-dlp cookie fallback resolved to video {vid}")
+                return vid
+        logger.error(f"ytpull {what}: yt-dlp cookie fallback found no usable video entries")
+        return None
+    except Exception as e:
+        logger.error(f"ytpull {what}: yt-dlp cookie fallback failed ({type(e).__name__}: {e})")
+        return None
+
+
 # Returns (link, formatted duration), or (None, None) if the song can't be
 # resolved. Never raises: an exception here used to kill queue advancement.
 def ytpull(query, is_video_id=False):
@@ -123,13 +178,20 @@ def ytpull(query, is_video_id=False):
     if not is_video_id:
         # get video info for first search result
         body = _yt_api_get('search', {'q': query + " explicit audio"}, f"search {query!r}")
-        if body is None:
+        resolved = None
+        if body is not None:
+            try:
+                resolved = body['items'][0]['id']['videoId'] # change query to youtube ID
+            except (KeyError, IndexError, TypeError) as e:
+                logger.error(f"ytpull search {query!r}: no usable result ({type(e).__name__}: {e}); items={body.get('items')!r:.500}")
+        if resolved is None:
+            # Data API gave nothing (0 items, or no usable videoId in the
+            # top hit) — try the authenticated yt-dlp fallback before
+            # giving up on the search entirely.
+            resolved = _ytdlp_search_fallback(query, f"search {query!r}")
+        if resolved is None:
             return None, None
-        try:
-            query = body['items'][0]['id']['videoId'] # change query to youtube ID
-        except (KeyError, IndexError, TypeError) as e:
-            logger.error(f"ytpull search {query!r}: no usable result ({type(e).__name__}: {e}); items={body.get('items')!r:.500}")
-            return None, None
+        query = resolved
         logger.debug(f"ytpull search resolved to video {query}")
 
     # get video info from video_id
