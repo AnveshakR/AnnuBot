@@ -180,10 +180,18 @@ def ytpull(query, is_video_id=False):
         body = _yt_api_get('search', {'q': query + " explicit audio"}, f"search {query!r}")
         resolved = None
         if body is not None:
-            try:
-                resolved = body['items'][0]['id']['videoId'] # change query to youtube ID
-            except (KeyError, IndexError, TypeError) as e:
-                logger.error(f"ytpull search {query!r}: no usable result ({type(e).__name__}: {e}); items={body.get('items')!r:.500}")
+            # The top hit isn't always a video — search can rank a playlist
+            # or channel first (those have id.playlistId/channelId instead
+            # of id.videoId). Walk the results for the first actual video
+            # instead of blindly trusting items[0].
+            items = body.get('items') or []
+            for item in items:
+                vid = (item.get('id') or {}).get('videoId')
+                if vid:
+                    resolved = vid
+                    break
+            if resolved is None:
+                logger.error(f"ytpull search {query!r}: no usable result (no video in top results); items={items!r:.500}")
         if resolved is None:
             # Data API gave nothing (0 items, or no usable videoId in the
             # top hit) — try the authenticated yt-dlp fallback before
