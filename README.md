@@ -9,7 +9,7 @@ Prefix for this bot is **annu**
 > *Now supports slash commands!*
 
 ## Commands
-- `play [baja]:`Plays song/playlist/album from YT and Spotify
+- `play [baja]:`Plays song/playlist/album from YT, Spotify and Apple Music
 - `irshad [sher]:` Get an authentic Annu Malik shayari!
 - `queue:` Shows the current queue
 - `skip [next, agla] <number>:` Goes to next song or to the index specified
@@ -42,7 +42,16 @@ DISCORD_TOKEN = <your discord token>
 SPOTIFY_ID = <your spotify client id>
 SPOTIFY_SECRET = <your spotify secret>
 YT_KEY = <your Youtube API v3 key>
+APPLE_MUSIC_TEAM_ID = <your Apple Developer Team ID>
+APPLE_MUSIC_KEY_ID = <your MusicKit Key ID>
+APPLE_MUSIC_PRIVATE_KEY_PATH = <path to your MusicKit .p8 private key>
 ```
+- Apple Music support requires an Apple Developer account: create a Media ID identifier and
+  a Key with the MusicKit service enabled (Certificates, Identifiers & Profiles → Keys), then
+  download the `.p8` file it gives you (one-time download) and point
+  `APPLE_MUSIC_PRIVATE_KEY_PATH` at it. No app review or extra cost beyond the existing paid
+  Developer Program membership is needed — this is catalog-only (public song/album/playlist
+  lookups), not user-authenticated access.
 - You will also need the FFMPEG binary (not the python module) accessible through PATH in your respective OS.
 - *annubot.py* is the main runfile.
 

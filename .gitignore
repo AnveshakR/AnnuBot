@@ -6,3 +6,5 @@ annu-env/
 .vscode/
 __pycache__/
 *.ipynb
+secrets/
+*.p8

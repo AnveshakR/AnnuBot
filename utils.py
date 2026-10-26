@@ -1,5 +1,6 @@
 import requests
 import os
+import time
 from dotenv import load_dotenv
 import re
 import unicodedata
@@ -15,10 +16,14 @@ load_dotenv()
 YT_KEY = os.getenv('YT_KEY')
 SPOTIFY_ID = os.getenv('SPOTIFY_ID')
 SPOTIFY_SECRET = os.getenv('SPOTIFY_SECRET')
+APPLE_MUSIC_TEAM_ID = os.getenv('APPLE_MUSIC_TEAM_ID')
+APPLE_MUSIC_KEY_ID = os.getenv('APPLE_MUSIC_KEY_ID')
+APPLE_MUSIC_PRIVATE_KEY_PATH = os.getenv('APPLE_MUSIC_PRIVATE_KEY_PATH')
 
 auth_url = 'https://accounts.spotify.com/api/token'
 ytbase = "https://www.youtube.com/watch?v="
 spotify_base = 'https://api.spotify.com/v1/{link_type}/{id}'
+apple_music_base = 'https://api.music.apple.com/v1/catalog/{storefront}/{link_type}/{id}'
 
 # invisible/filler codepoints that render as nothing (e.g. Hangul filler U+3164)
 # but break markdown link text when used as a title.
@@ -185,6 +190,59 @@ def spotifypull(uri, link_type) -> list:
 
         return song_names
 
+# ---- Apple Music -------------------------------------------------------
+# Developer token (ES256 JWT) is cached and regenerated when it's within
+# _AM_TOKEN_REFRESH_MARGIN of expiry, same idea as the Spotify client-
+# credentials flow but entirely local (no network round trip needed to mint
+# it — only the catalog lookup itself hits the network).
+_AM_TOKEN_TTL = 60 * 60 * 12          # 12h life per token (max allowed: ~6 months)
+_AM_TOKEN_REFRESH_MARGIN = 60 * 5     # refresh 5 min before expiry
+_am_token_cache = {'token': None, 'exp': 0}
+
+
+def _apple_music_token() -> str:
+    """Return a cached-or-fresh Apple Music developer token (ES256 JWT)."""
+    now = int(time.time())
+    if _am_token_cache['token'] and now < _am_token_cache['exp'] - _AM_TOKEN_REFRESH_MARGIN:
+        return _am_token_cache['token']
+
+    import jwt  # local import: only needed if Apple Music is actually used
+    with open(APPLE_MUSIC_PRIVATE_KEY_PATH, encoding='utf-8') as f:
+        private_key = f.read()
+    token = jwt.encode(
+        {'iss': APPLE_MUSIC_TEAM_ID, 'iat': now, 'exp': now + _AM_TOKEN_TTL},
+        private_key, algorithm='ES256',
+        headers={'kid': APPLE_MUSIC_KEY_ID, 'alg': 'ES256'})
+    _am_token_cache['token'] = token
+    _am_token_cache['exp'] = now + _AM_TOKEN_TTL
+    return token
+
+
+# get song name(s) from an Apple Music catalog id using the Apple Music API
+def applemusicpull(storefront, uri, link_type) -> list:
+    headers = {'Authorization': f'Bearer {_apple_music_token()}'}
+    url = apple_music_base.format(storefront=storefront, link_type=link_type, id=uri)
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()['data'][0]
+    except Exception as e:
+        logger.error(f"applemusicpull failed: {e}")
+        return []
+
+    song_names = []
+    attrs = data.get('attributes', {})
+
+    if link_type == 'songs':
+        song_names.append(f"{attrs.get('name')} by {attrs.get('artistName')}")
+    elif link_type in ('playlists', 'albums'):
+        tracks = data.get('relationships', {}).get('tracks', {}).get('data', [])
+        for t in tracks:
+            tattrs = t.get('attributes', {})
+            song_names.append(f"{tattrs.get('name')} by {tattrs.get('artistName')}")
+
+    return song_names
+
 # checks if link is a youtube link
 def is_youtube_link(query) -> bool:
     parsed_url = urlparse(query)
@@ -194,6 +252,11 @@ def is_youtube_link(query) -> bool:
 def is_spotify_link(query) -> bool:
     parsed_url = urlparse(query)
     return parsed_url.netloc == 'open.spotify.com' or parsed_url.netloc == 'spotify' or parsed_url.netloc == 'spotify.link'
+
+# checks if link is an apple music link
+def is_apple_music_link(query) -> bool:
+    parsed_url = urlparse(query)
+    return parsed_url.netloc == 'music.apple.com'
 
 # takes a query and returns the video id(for YT links) or names to be searched in youtube(non-YT links) as an array,
 # and a boolean that signifies if the query was a YT link or not
@@ -247,6 +310,34 @@ def request(query) -> Tuple[list, bool]:
         
         names = spotifypull(uri, link_type) # get names from spotify api
 
+        return names, False
+
+    elif is_apple_music_link(query): # if request is an apple music link
+        # URL shapes:
+        #   https://music.apple.com/{storefront}/song/{slug}/{id}
+        #   https://music.apple.com/{storefront}/album/{slug}/{id}            (whole album)
+        #   https://music.apple.com/{storefront}/album/{slug}/{id}?i={track}  (one track from an album)
+        #   https://music.apple.com/{storefront}/playlist/{slug}/{id}
+        path_parts = [p for p in urlparse(query).path.split('/') if p]
+        storefront = path_parts[0] if path_parts else 'us'
+        type_map = {'song': 'songs', 'album': 'albums', 'playlist': 'playlists'}
+        link_type = None
+        catalog_id = None
+        if len(path_parts) >= 3 and path_parts[1] in type_map:
+            link_type = type_map[path_parts[1]]
+            catalog_id = path_parts[3] if len(path_parts) > 3 else path_parts[2]
+
+        query_params = dict(p.split('=', 1) for p in urlparse(query).query.split('&') if '=' in p)
+        track_id = query_params.get('i')
+        if link_type == 'albums' and track_id:
+            # ?i= on an album link is a single-track share link
+            link_type, catalog_id = 'songs', track_id
+
+        if link_type is None or catalog_id is None:
+            logger.error(f"could not parse apple music link: {query}")
+            return [], False
+
+        names = applemusicpull(storefront, catalog_id, link_type)
         return names, False
 
     else: # if request is a general query
