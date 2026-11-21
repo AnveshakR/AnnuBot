@@ -9,7 +9,7 @@ Prefix for this bot is **annu**
 > *Now supports slash commands!*
 
 ## Commands
-- `play [baja]:`Plays song/playlist/album from YT, Spotify and Apple Music. Append `shuffle` to add a playlist shuffled (e.g. `annu play <playlist link> shuffle`)
+- `play [baja]:`Plays song/playlist/album from YT and Apple Music (Spotify support is disabled). Append `shuffle` to add a playlist shuffled (e.g. `annu play <playlist link> shuffle`)
 - `irshad [sher]:` Get an authentic Annu Malik shayari!
 - `queue:` Shows the current queue
 - `skip [next, agla] <number>:` Goes to next song or to the index specified
@@ -41,8 +41,8 @@ Join the Annubot Discord server with [this link](https://discord.gg/2eBN3q3Yvk)!
 - After cloning this repo, place an .env file in the repo folder to be able to run it locally. The file format should be:
 ```
 DISCORD_TOKEN = <your discord token>
-SPOTIFY_ID = <your spotify client id>
-SPOTIFY_SECRET = <your spotify secret>
+SPOTIFY_ID = <your spotify client id>          # unused: Spotify support is disabled
+SPOTIFY_SECRET = <your spotify secret>         # unused: Spotify support is disabled
 YT_KEY = <your Youtube API v3 key>
 APPLE_MUSIC_TEAM_ID = <your Apple Developer Team ID>
 APPLE_MUSIC_KEY_ID = <your MusicKit Key ID>

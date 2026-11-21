@@ -20,8 +20,8 @@ load_dotenv()
 MAX_PLAYLIST_ITEMS = 500
 
 YT_KEY = os.getenv('YT_KEY')
-SPOTIFY_ID = os.getenv('SPOTIFY_ID')
-SPOTIFY_SECRET = os.getenv('SPOTIFY_SECRET')
+# SPOTIFY_ID = os.getenv('SPOTIFY_ID')  # Spotify disabled
+# SPOTIFY_SECRET = os.getenv('SPOTIFY_SECRET')  # Spotify disabled
 APPLE_MUSIC_TEAM_ID = os.getenv('APPLE_MUSIC_TEAM_ID')
 APPLE_MUSIC_KEY_ID = os.getenv('APPLE_MUSIC_KEY_ID')
 APPLE_MUSIC_PRIVATE_KEY_PATH = os.getenv('APPLE_MUSIC_PRIVATE_KEY_PATH')
@@ -34,9 +34,9 @@ APPLE_MUSIC_PRIVATE_KEY_PATH = os.getenv('APPLE_MUSIC_PRIVATE_KEY_PATH')
 # repo checkout, path supplied via env only. Feature is a no-op if unset.
 YT_COOKIES_FILE = os.getenv('ANNUBOT_YT_COOKIES')
 
-auth_url = 'https://accounts.spotify.com/api/token'
+# auth_url = 'https://accounts.spotify.com/api/token'  # Spotify disabled
 ytbase = "https://www.youtube.com/watch?v="
-spotify_base = 'https://api.spotify.com/v1/{link_type}/{id}'
+# spotify_base = 'https://api.spotify.com/v1/{link_type}/{id}'  # Spotify disabled
 apple_music_base = 'https://api.music.apple.com/v1/catalog/{storefront}/{link_type}/{id}'
 
 # invisible/filler codepoints that render as nothing (e.g. Hangul filler U+3164)
@@ -243,69 +243,70 @@ def ytpull(query, is_video_id=False):
     return link, time
 
 
-# get song name from spotify URI using spotify API
-def spotifypull(uri, link_type) -> list:
-
-    # handles abstracted spotify .link links by getting the redirected url
-    if link_type == 'any':
-        return request(requests.get(f"https://spotify.link/{uri}", timeout=10).url)[0]
-
-    else:
-        auth_response = requests.post(auth_url, {
-        'grant_type': 'client_credentials',
-        'client_id': SPOTIFY_ID,
-        'client_secret': SPOTIFY_SECRET,
-        }, timeout=10)
-
-        auth_response_data = auth_response.json()
-        access_token = auth_response_data.get('access_token')
-        if not access_token:
-            # e.g. invalid_client: the app's client id/secret were rotated or
-            # the Spotify app was deleted. Fix SPOTIFY_ID/SPOTIFY_SECRET.
-            logger.error(f"spotifypull: Spotify auth failed: HTTP {auth_response.status_code} "
-                         f"{auth_response_data.get('error')!r} {auth_response_data.get('error_description')!r}")
-            return []
-        headers = {
-            'Authorization': 'Bearer {token}'.format(token=access_token)
-        }
-        # gets response based on type of spotify link
-        r = requests.get(spotify_base.format(link_type=link_type, id=uri), headers=headers, timeout=10)
-        if r.status_code != 200:
-            # e.g. 404 for Spotify-owned editorial/algorithmic playlists,
-            # which client-credentials apps can't read.
-            logger.error(f"spotifypull {link_type}/{uri}: HTTP {r.status_code}: {r.text[:300]!r}")
-            return []
-        r = r.json()
-        # return song based on link type
-        song_names = []
-
-        if link_type == 'tracks':
-            artist_names = ', '.join(artist['name'] for artist in r['artists'])
-            song_names.append(f"{r['name']} by {artist_names}")
-        elif link_type in ('playlists', 'albums'):
-            # Paginated: the first page is embedded in r['tracks'] (100 for
-            # playlists, 50 for albums); follow 'next' for the rest.
-            page = r['tracks']
-            while True:
-                for i in page.get('items') or []:
-                    # playlist items wrap the track (and it can be null for a
-                    # removed/unavailable track); album items ARE the track.
-                    t = i.get('track') if link_type == 'playlists' else i
-                    if not t:
-                        continue
-                    artist_names = ', '.join(artist['name'] for artist in t['artists'])
-                    song_names.append(f"{t['name']} by {artist_names}")
-                nxt = page.get('next')
-                if not nxt or len(song_names) >= MAX_PLAYLIST_ITEMS:
-                    break
-                resp = requests.get(nxt, headers=headers, timeout=10)
-                if resp.status_code != 200:
-                    logger.error(f"spotifypull page fetch: HTTP {resp.status_code}; "
-                                 f"keeping the {len(song_names)} tracks loaded so far")
-                    break
-                page = resp.json()
-
-        return song_names[:MAX_PLAYLIST_ITEMS]
+# --- Spotify flow, disabled (no Premium / API app). Uncomment to restore. ---
+# # get song name from spotify URI using spotify API
+# def spotifypull(uri, link_type) -> list:
+#
+#     # handles abstracted spotify .link links by getting the redirected url
+#     if link_type == 'any':
+#         return request(requests.get(f"https://spotify.link/{uri}", timeout=10).url)[0]
+#
+#     else:
+#         auth_response = requests.post(auth_url, {
+#         'grant_type': 'client_credentials',
+#         'client_id': SPOTIFY_ID,
+#         'client_secret': SPOTIFY_SECRET,
+#         }, timeout=10)
+#
+#         auth_response_data = auth_response.json()
+#         access_token = auth_response_data.get('access_token')
+#         if not access_token:
+#             # e.g. invalid_client: the app's client id/secret were rotated or
+#             # the Spotify app was deleted. Fix SPOTIFY_ID/SPOTIFY_SECRET.
+#             logger.error(f"spotifypull: Spotify auth failed: HTTP {auth_response.status_code} "
+#                          f"{auth_response_data.get('error')!r} {auth_response_data.get('error_description')!r}")
+#             return []
+#         headers = {
+#             'Authorization': 'Bearer {token}'.format(token=access_token)
+#         }
+#         # gets response based on type of spotify link
+#         r = requests.get(spotify_base.format(link_type=link_type, id=uri), headers=headers, timeout=10)
+#         if r.status_code != 200:
+#             # e.g. 404 for Spotify-owned editorial/algorithmic playlists,
+#             # which client-credentials apps can't read.
+#             logger.error(f"spotifypull {link_type}/{uri}: HTTP {r.status_code}: {r.text[:300]!r}")
+#             return []
+#         r = r.json()
+#         # return song based on link type
+#         song_names = []
+#
+#         if link_type == 'tracks':
+#             artist_names = ', '.join(artist['name'] for artist in r['artists'])
+#             song_names.append(f"{r['name']} by {artist_names}")
+#         elif link_type in ('playlists', 'albums'):
+#             # Paginated: the first page is embedded in r['tracks'] (100 for
+#             # playlists, 50 for albums); follow 'next' for the rest.
+#             page = r['tracks']
+#             while True:
+#                 for i in page.get('items') or []:
+#                     # playlist items wrap the track (and it can be null for a
+#                     # removed/unavailable track); album items ARE the track.
+#                     t = i.get('track') if link_type == 'playlists' else i
+#                     if not t:
+#                         continue
+#                     artist_names = ', '.join(artist['name'] for artist in t['artists'])
+#                     song_names.append(f"{t['name']} by {artist_names}")
+#                 nxt = page.get('next')
+#                 if not nxt or len(song_names) >= MAX_PLAYLIST_ITEMS:
+#                     break
+#                 resp = requests.get(nxt, headers=headers, timeout=10)
+#                 if resp.status_code != 200:
+#                     logger.error(f"spotifypull page fetch: HTTP {resp.status_code}; "
+#                                  f"keeping the {len(song_names)} tracks loaded so far")
+#                     break
+#                 page = resp.json()
+#
+#         return song_names[:MAX_PLAYLIST_ITEMS]
 
 # ---- Apple Music -------------------------------------------------------
 # Developer token (ES256 JWT) is cached and regenerated when it's within
@@ -382,7 +383,8 @@ def is_youtube_link(query) -> bool:
 # checks if link is a spotify link
 def is_spotify_link(query) -> bool:
     parsed_url = urlparse(query)
-    return parsed_url.netloc == 'open.spotify.com' or parsed_url.netloc == 'spotify' or parsed_url.netloc == 'spotify.link'
+    return (parsed_url.netloc in ('open.spotify.com', 'spotify.link')
+            or query.strip().lower().startswith('spotify:'))
 
 # checks if link is an apple music link
 def is_apple_music_link(query) -> bool:
@@ -443,27 +445,30 @@ def request(query) -> Tuple[list, bool]:
             video_links.append(video_id)
         return video_links, True
 
-    elif is_spotify_link(query): # if request is a spotify link
-        patterns = [
-        (r'^https://open\.spotify\.com/track/([a-zA-Z0-9]+)', 'tracks'),
-        (r'^https://open\.spotify\.com/album/([a-zA-Z0-9]+)', 'albums'),
-        (r'^https://open\.spotify\.com/playlist/([a-zA-Z0-9]+)', 'playlists'),
-        (r'^spotify:track:([a-zA-Z0-9]+)', 'tracks'),
-        (r'^spotify:album:([a-zA-Z0-9]+)', 'albums'),
-        (r'^spotify:playlist:([a-zA-Z0-9]+)', 'playlists'),
-        (r'https://spotify.link/([a-zA-Z0-9]+)', 'any')
-        ]
-        uri = None
-        # finds type of spotify link (track, album or playlist)
-        for pattern, link_type in patterns:
-            match = re.match(pattern, query)
-            if match:
-                uri = match.group(1)
-                break
-        
-        names = spotifypull(uri, link_type) # get names from spotify api
-
-        return names, False
+    elif is_spotify_link(query): # Spotify disabled (no Premium/API app): play() replies, nothing is queued
+        return [], False
+    # --- Spotify flow, disabled ---
+    # elif is_spotify_link(query): # if request is a spotify link
+    #     patterns = [
+    #     (r'^https://open\.spotify\.com/track/([a-zA-Z0-9]+)', 'tracks'),
+    #     (r'^https://open\.spotify\.com/album/([a-zA-Z0-9]+)', 'albums'),
+    #     (r'^https://open\.spotify\.com/playlist/([a-zA-Z0-9]+)', 'playlists'),
+    #     (r'^spotify:track:([a-zA-Z0-9]+)', 'tracks'),
+    #     (r'^spotify:album:([a-zA-Z0-9]+)', 'albums'),
+    #     (r'^spotify:playlist:([a-zA-Z0-9]+)', 'playlists'),
+    #     (r'https://spotify.link/([a-zA-Z0-9]+)', 'any')
+    #     ]
+    #     uri = None
+    #     # finds type of spotify link (track, album or playlist)
+    #     for pattern, link_type in patterns:
+    #         match = re.match(pattern, query)
+    #         if match:
+    #             uri = match.group(1)
+    #             break
+    #
+    #     names = spotifypull(uri, link_type) # get names from spotify api
+    #
+    #     return names, False
 
     elif is_apple_music_link(query): # if request is an apple music link
         # URL shapes:

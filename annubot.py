@@ -869,14 +869,14 @@ async def shayari(ctx: commands.Context):
     # random shayri
     await ctx.send(f'Annu says: {random.choice(sher)}')
 
-# play song based on youtube or spotify links, or a general query
-@bot.hybrid_command(name='play', description="Plays song/playlist from YT, Spotify, Apple Music. Append 'shuffle' to shuffle a playlist.", aliases=['baja'], pass_context=True)
+# play song based on youtube or apple music links, or a general query
+@bot.hybrid_command(name='play', description="Plays song/playlist from YouTube or Apple Music. Append 'shuffle' to shuffle a playlist.", aliases=['baja'], pass_context=True)
 async def play(ctx: commands.Context, *, query=None):
 
     loading_msg = await ctx.send("Loading...")
 
     # Optional trailing "shuffle" keyword: shuffle a multi-song add (YT/
-    # Spotify/Apple Music playlist) among itself. Only the newly-added items
+    # Apple Music playlist) among itself. Only the newly-added items
     # are shuffled — the rest of the queue keeps its order.
     shuffle = False
     if query:
@@ -891,6 +891,8 @@ async def play(ctx: commands.Context, *, query=None):
     # HTTP calls, and on the loop it froze voice and every other command.
     items, is_video_id = [], False
     if query is not None:
+        if is_spotify_link(query):
+            return await loading_msg.edit(content="Spotify links aren't supported anymore. Try the YouTube or Apple Music link, or just the song name.")
         try:
             items, is_video_id = await asyncio.to_thread(request, query)
         except Exception:
@@ -1468,7 +1470,7 @@ async def help(ctx: commands.Context):
     helpembed.title = "Annu Commands"
     helpembed.color = discord.Colour(0x7289DA)
     helpembed.description = (
-    "`play [baja]:` Plays song/playlist from YouTube, Spotify or Apple Music (append `shuffle` to add a playlist shuffled)\n"
+    "`play [baja]:` Plays song/playlist from YouTube or Apple Music (append `shuffle` to add a playlist shuffled)\n"
     "`irshad [sher]:` Get an authentic Annu Malik shayari!\n"
     "`queue:` Shows the current queue\n"
     "`skip [next, agla] <number>:` Goes to next song or to the index specified\n"
