@@ -7,6 +7,7 @@ import random
 import re
 import discord
 import asyncio
+from discord import app_commands
 from discord.ext import commands
 import queue
 import logging
@@ -473,7 +474,10 @@ async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandOnCooldown):
         await ctx.send(f"Try again in {error.retry_after:.1f}s.")
     elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send("Missing required argument. Use `annu help` for usage.")
+        if ctx.command is not None and ctx.command.name == 'play':
+            await ctx.send("Give me a song or a link. To continue the queue, use `resume`.")
+        else:
+            await ctx.send("Missing required argument. Use `annu help` for usage.")
     elif isinstance(error, NotInWorkingChannel):
         # working channel is set and this command came from somewhere else
         wc = CONFIG.working_channel(ctx.guild.id)
@@ -869,9 +873,15 @@ async def shayari(ctx: commands.Context):
     # random shayri
     await ctx.send(f'Annu says: {random.choice(sher)}')
 
-# play song based on youtube or apple music links, or a general query
-@bot.hybrid_command(name='play', description="Plays song/playlist from YouTube or Apple Music. Append 'shuffle' to shuffle a playlist.", aliases=['baja'], pass_context=True)
-async def play(ctx: commands.Context, *, query=None, shuffle: bool = False):
+# play song based on youtube or apple music links, or a general query.
+# `query` is REQUIRED: Discord only drops the cursor straight into an option
+# (so text typed after /play lands in it) when that option is required. As
+# optional, a typed song was silently dropped and /play ran with no query.
+# Continuing the queue / a paused song is /resume's job.
+@bot.hybrid_command(name='play', description="Plays a song or playlist from YouTube or Apple Music", aliases=['baja'], pass_context=True)
+@app_commands.describe(query="Song name, or a YouTube / Apple Music link",
+                       shuffle="Shuffle a playlist as it's added")
+async def play(ctx: commands.Context, *, query: str, shuffle: bool = False):
 
     loading_msg = await ctx.send("Loading...")
 
