@@ -4,6 +4,7 @@ from config import CONFIG
 from dotenv import load_dotenv
 import os
 import random
+import re
 import discord
 import asyncio
 from discord.ext import commands
@@ -757,11 +758,23 @@ async def shayari(ctx: commands.Context):
     await ctx.send(f'Annu says: {random.choice(sher)}')
 
 # play song based on youtube or spotify links, or a general query
-@bot.hybrid_command(name='play', description="Plays your song by name/YT/Spotify/Apple Music URL or resumes playing from queue if no query given", aliases=['baja'], pass_context=True)
+@bot.hybrid_command(name='play', description="Plays your song by name/YT/Spotify/Apple Music URL or resumes playing from queue if no query given. Append 'shuffle' to add a playlist shuffled.", aliases=['baja'], pass_context=True)
 async def play(ctx: commands.Context, *, query=None):
 
     loading_msg = await ctx.send("Loading...")
     bot_voice = discord.utils.get(bot.voice_clients, guild=ctx.guild)
+
+    # Optional trailing "shuffle" keyword: shuffle a multi-song add (YT/
+    # Spotify/Apple Music playlist) among itself. Only the newly-added items
+    # are shuffled — the rest of the queue keeps its order.
+    shuffle = False
+    if query:
+        m = re.search(r"\s+shuffle\s*$", query, re.IGNORECASE)
+        if m:
+            shuffle = True
+            query = query[:m.start()].strip()
+        if not query:
+            return await ctx.send("No query given!")
 
     connect_flag, message = await join(ctx, bot_voice=bot_voice, loading_msg=loading_msg, called=True)
     # connects bot to vc if not there
@@ -784,9 +797,12 @@ async def play(ctx: commands.Context, *, query=None):
                 return await play_next_song(ctx)
 
         items, is_video_id = request(query)
+        if shuffle and len(items) > 1:
+            random.shuffle(items)
         for item in items:
             Queue_Object.put_in_queue((item, is_video_id))
-        await loading_msg.edit(content="Added to queue, now playing!")
+        await loading_msg.edit(content=(f"Added {len(items)} songs shuffled to queue, now playing!"
+                                        if shuffle and len(items) > 1 else "Added to queue, now playing!"))
         if not ctx.voice_client.is_playing() or not ctx.voice_client.is_paused():
             return await play_next_song(ctx)
 
@@ -1356,7 +1372,7 @@ async def help(ctx: commands.Context):
     helpembed.title = "Annu Commands"
     helpembed.color = discord.Colour(0x7289DA)
     helpembed.description = (
-    "`play [baja]:` Plays song/playlist from YouTube, Spotify or Apple Music\n"
+    "`play [baja]:` Plays song/playlist from YouTube, Spotify or Apple Music (append `shuffle` to add a playlist shuffled)\n"
     "`irshad [sher]:` Get an authentic Annu Malik shayari!\n"
     "`queue:` Shows the current queue\n"
     "`skip [next, agla] <number>:` Goes to next song or to the index specified\n"
