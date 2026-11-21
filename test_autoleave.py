@@ -36,6 +36,16 @@ class FakeVC:
         self.guild = guild
         self.channel = channel
         self.disconnected = False
+        self.paused = False
+
+    def is_paused(self):
+        return self.paused
+
+    def is_playing(self):
+        return False
+
+    def resume(self):
+        self.paused = False
 
     async def disconnect(self):
         self.disconnected = True
@@ -116,6 +126,26 @@ async def main():
     await A.on_voice_state_update(FakeMember(guild, bot=False, name="alice2"), State(channel3), State(None))
     assert A._leave_tasks.get(guild.id) is None, "should NOT start countdown while a human remains"
     print("PASS 5: no countdown while another human is still in the channel")
+
+    # ---- Scenario 6: auto-paused music resumes when someone re-joins
+    # Regression test for the AttributeError crash: the old code called
+    # is_paused()/resume() on the CHANNEL object (VoiceChannel has neither),
+    # which raised mid-handler and left the music paused forever.
+    A._leave_tasks.clear()
+    channel4 = FakeChannel("AutoPause")
+    add(channel4, A.bot.user)
+    add(channel4, human)
+    vc.channel = channel4
+    A._autopaused.add(guild.id)      # bot paused the music when the VC emptied
+    vc.paused = True                 # and the voice client is paused
+    st = A._states.setdefault(guild.id, None)  # absent is fine: code handles None
+    try:
+        await A.on_voice_state_update(human, State(None), State(channel4))
+    except AttributeError as e:
+        raise AssertionError(f"on_voice_state_update crashed on resume: {e}")
+    assert not vc.paused, "music should have resumed when someone re-joined"
+    assert guild.id not in A._autopaused, "auto-pause flag should be cleared"
+    print("PASS 6: auto-paused music resumed when someone re-joined")
 
     print("\nALL AUTO-LEAVE LOGIC TESTS PASSED")
 

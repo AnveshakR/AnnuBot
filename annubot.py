@@ -662,9 +662,13 @@ async def on_voice_state_update(member, before, after):
         # user's manual pause is left for them to resume.
         if member.guild.id in _autopaused:
             _autopaused.discard(member.guild.id)
-            if bot_channel.is_paused():
+            # is_paused/resume live on the VOICE CLIENT (vc), not the channel:
+            # calling them on bot_channel raised AttributeError and left the
+            # music paused forever (the guild was already popped from
+            # _autopaused above, so the resume never got a second chance).
+            if vc.is_paused():
                 logger.info(f"Resuming auto-paused music: someone joined {bot_channel}")
-                bot_channel.resume()
+                vc.resume()
                 st = _states.get(member.guild.id)
                 if st is not None:
                     st.pos.resume()
@@ -696,6 +700,13 @@ async def join(ctx: commands.Context, bot_voice=None, loading_msg=None, called=F
     elif bot_voice is None and ctx.author.voice:
         await loading_msg.edit(content=f"Joining {ctx.author.voice.channel}!")
         await ctx.author.voice.channel.connect()
+        # If the queue has songs from before the bot was dropped from voice
+        # (e.g. after a "Voice connection lost — skipping this song"), start
+        # advancing it now: play_next_song's "not connected to voice" path
+        # leaves songs queued, and nothing else would unblock them.
+        qo = GuildQueue.instances[ctx.guild.id]
+        if not qo.is_queue_empty():
+            asyncio.create_task(play_next_song(ctx))
         return True, "Success"
 
     # if author and bot in same VC but wasn't called by another function
