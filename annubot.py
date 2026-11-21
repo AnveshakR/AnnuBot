@@ -709,9 +709,9 @@ async def join(ctx: commands.Context, bot_voice=None, loading_msg=None, called=F
         # leaves songs queued, and nothing else would unblock them. A song
         # paused by auto-leave (st.current) is NOT popped here — /resume owns
         # it, and popping the next queue song would skip over it.
-        qo = GuildQueue.instances[ctx.guild.id]
+        qo = GuildQueue.instances.get(ctx.guild.id)  # None on a fresh process: no queue object yet
         st = _states.get(ctx.guild.id)
-        if (st is None or st.current is None) and not qo.is_queue_empty():
+        if qo is not None and (st is None or st.current is None) and not qo.is_queue_empty():
             asyncio.create_task(play_next_song(ctx))
         return True, "Success"
 
