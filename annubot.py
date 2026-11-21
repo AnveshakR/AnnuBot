@@ -450,6 +450,8 @@ async def on_resumed():
 
 @bot.event
 async def on_command(ctx):
+    if ctx.guild is not None and ctx.channel is not None:
+        _last_channel[ctx.guild.id] = ctx.channel
     vc = ctx.voice_client
     logger.info("command %r from user %s in guild %s: args=%r kwargs=%r (vc connected=%s playing=%s paused=%s)",
                 ctx.command.qualified_name if ctx.command else None,
@@ -536,9 +538,10 @@ def in_working_channel(ctx: commands.Context) -> bool:
     channel_id = CONFIG.working_channel(ctx.guild.id)
     if channel_id is None:
         return True
-    # the config command is exempt (it's how you set/change the channel) so an
-    # admin is never locked out of fixing a bad config from another channel.
-    if ctx.command is not None and ctx.command.qualified_name.split()[0] == 'config':
+    # the config / channel commands are exempt (they're how you set/change the
+    # channel) so an admin is never locked out of fixing a bad config from
+    # another channel.
+    if ctx.command is not None and ctx.command.qualified_name.split()[0] in ('config', 'setchannel', 'clearchannel'):
         return True
     if ctx.channel is not None and ctx.channel.id == channel_id:
         return True
@@ -581,6 +584,22 @@ async def config_clearchannel(ctx: commands.Context):
     await ctx.send("Working channel cleared. I'll respond in any channel again.")
 
 
+# Slash-friendly versions of the above (the `config` group is prefix-only).
+@bot.hybrid_command(name='setchannel', description="Admin: only respond in this channel (default: the current one)")
+@commands.check(is_admin)
+async def setchannel(ctx: commands.Context, channel: discord.TextChannel = None):
+    channel = channel or ctx.channel
+    CONFIG.set_working_channel(ctx.guild.id, channel.id)
+    await ctx.send(f"Working channel set to {channel.mention}. I'll only respond there now.")
+
+
+@bot.hybrid_command(name='clearchannel', description="Admin: respond in any channel again")
+@commands.check(is_admin)
+async def clearchannel(ctx: commands.Context):
+    CONFIG.clear_working_channel(ctx.guild.id)
+    await ctx.send("Working channel cleared. I'll respond in any channel again.")
+
+
 @config.command(name='setadminrole', description="Add a role to the admin list")
 @commands.check(is_admin)
 async def config_setadminrole(ctx: commands.Context, role: discord.Role):
@@ -615,6 +634,19 @@ def _empty_people(channel):
     return [m for m in channel.members if not m.bot]
 
 
+# guild_id -> text channel the bot was last commanded from. Fallback target
+# for unprompted messages (auto-leave) when no working channel is set.
+_last_channel = {}
+
+
+def _chatter_channel(guild):
+    """Where unprompted bot messages go: the configured working channel, else
+    the last channel the bot was used in, else the server's system channel."""
+    wc = CONFIG.working_channel(guild.id)
+    ch = guild.get_channel(wc) if wc else None
+    return ch or _last_channel.get(guild.id) or guild.system_channel
+
+
 async def _do_leave(guild, channel):
     await asyncio.sleep(EMPTY_VC_LEAVE_DELAY)
     vc = discord.utils.get(bot.voice_clients, guild=guild)
@@ -636,8 +668,9 @@ async def _do_leave(guild, channel):
     else:
         logger.info(f"Empty VC in {guild} for {EMPTY_VC_LEAVE_DELAY}s; leaving (music stays paused)")
     try:
-        if guild.system_channel is not None:
-            await guild.system_channel.send(f"Leaving — it's been empty for {EMPTY_VC_LEAVE_DELAY}s.")
+        ch = _chatter_channel(guild)
+        if ch is not None:
+            await ch.send(f"Leaving — it's been empty for {EMPTY_VC_LEAVE_DELAY}s.")
     except Exception:
         pass  # no perms / channel gone; leave anyway
     await vc.disconnect()
@@ -697,48 +730,108 @@ async def on_voice_state_update(member, before, after):
                 logger.info(f"VC emptied, leaving in {EMPTY_VC_LEAVE_DELAY}s")
                 _leave_tasks[member.guild.id] = asyncio.create_task(_do_leave(member.guild, bot_channel))
 
+def _guild_queue(guild_id) -> 'GuildQueue':
+    """The guild's queue, creating it (and restoring any saved queue) if needed."""
+    return GuildQueue.instances.get(guild_id) or GuildQueue(guild_id)
+
+
+def _paused_song_pending(ctx) -> bool:
+    """True if a song was interrupted (auto-leave, lost voice, ...) and is
+    waiting to be picked up from where it stopped, with the bot out of voice."""
+    st = _states.get(ctx.guild.id)
+    vc = ctx.voice_client
+    return st is not None and st.current is not None and (vc is None or not vc.is_connected())
+
+
+async def _connect_to_author(ctx):
+    """Make sure the bot is in the author's VC. Returns an error string or None.
+
+    Never names the channel the bot is in: other servers' members shouldn't
+    learn where people are sitting.
+    """
+    if ctx.author.voice is None or ctx.author.voice.channel is None:
+        return "Join a voice channel first."
+    vc = ctx.voice_client
+    if vc is not None and not vc.is_connected():
+        # Stale client left behind by a voice drop that never reconnected:
+        # it blocks a fresh connect() ("Already connected"), so tear it down.
+        try:
+            await vc.disconnect(force=True)
+        except Exception:
+            logger.exception("tearing down stale voice client failed")
+        vc = None
+    if vc is None:
+        await ctx.author.voice.channel.connect()
+        return None
+    if vc.channel != ctx.author.voice.channel:
+        return "Can't join your voice channel right now."
+    return None
+
+
+async def _restart_current(ctx, loading_msg=None):
+    """Restart the interrupted song (st.current) from its frozen position.
+
+    The song is not in the queue (popped when it started), so the queue can't
+    restart it; its position lives on the SongState. Caller must have
+    connected the bot to voice. Returns True if playback started.
+    """
+    async def say(text):
+        if loading_msg is not None:
+            await loading_msg.edit(content=text)
+        else:
+            await ctx.send(text)
+
+    st = _states.get(ctx.guild.id)
+    song = st.current
+    pos = st.pos.seconds()
+    # Bump so any stale callback from before the interruption no-ops; the
+    # position clock restarts reading exactly at the paused second.
+    st = _bump_generation(ctx.guild.id)
+    gen = st.generation
+    st.pos.seek_to(pos)
+    st.pos.pause()  # frozen until audio actually starts
+    st.retries = 0
+    fresh = await audiostream(song['url'], loop=bot.loop, stream=True, start=pos)
+    if fresh is None:
+        st.current = None
+        await say("Couldn't restart that song. Moving on.")
+        asyncio.create_task(play_next_song(ctx))
+        return False
+    # The extract above awaited; a skip/play may have replaced this song in
+    # the meantime. If so, drop the restart — the new song owns the player.
+    if st.generation != gen:
+        try:
+            fresh[0].cleanup()
+        except Exception:
+            pass
+        return False
+    after_cb = _make_playback_callbacks(ctx, st, song['ytid'], song['url'], song['duration'], gen)
+    try:
+        st.pos.seek_to(pos)  # clock runs from here
+        ctx.voice_client.play(fresh[0], after=after_cb)
+    except discord.ClientException as e:
+        try:
+            fresh[0].cleanup()
+        except Exception:
+            pass
+        await say(f"Couldn't resume ({type(e).__name__}).")
+        return False
+    _autopaused.discard(ctx.guild.id)
+    await say(f"Resumed {song['title']} at {int(pos // 60)}:{int(pos % 60):02d}.")
+    return True
+
+
 @bot.hybrid_command(name='join', description="Joins your voice channel", aliases=['connect'], pass_context=True)
 async def join(ctx: commands.Context, bot_voice=None, loading_msg=None, called=False):
-
-    if loading_msg is None:
-        loading_msg = await ctx.send("Loading...")
-
-    # getting bot's voice channel object
-    bot_voice = discord.utils.get(bot.voice_clients, guild=ctx.guild)
-
-    # if user not in VC
-    if ctx.author.voice is None:
-        await loading_msg.edit(content="You are not connected to a voice channel.")
-        return False, "You are not connected to a voice channel."
-
-    # if bot not in VC but author in VC
-    elif bot_voice is None and ctx.author.voice:
-        await loading_msg.edit(content=f"Joining {ctx.author.voice.channel}!")
-        await ctx.author.voice.channel.connect()
-        # If the queue has songs from before the bot was dropped from voice
-        # (e.g. after a "Voice connection lost — skipping this song"), start
-        # advancing it now: play_next_song's "not connected to voice" path
-        # leaves songs queued, and nothing else would unblock them. A song
-        # paused by auto-leave (st.current) is NOT popped here — /resume owns
-        # it, and popping the next queue song would skip over it.
-        qo = GuildQueue.instances.get(ctx.guild.id)  # None on a fresh process: no queue object yet
-        st = _states.get(ctx.guild.id)
-        if qo is not None and (st is None or st.current is None) and not qo.is_queue_empty():
-            asyncio.create_task(play_next_song(ctx))
-        return True, "Success"
-
-    # if author and bot in same VC but wasn't called by another function
-    elif ctx.author.voice.channel == bot_voice.channel and not called:
-        await loading_msg.edit(content="Already in your voice channel!")
-        return True, "Success"
-
-    elif ctx.author.voice.channel == bot_voice.channel and called:
-        return True, "Success"
-
-    # if bot and author in different VCs
-    elif ctx.author.voice.channel != bot_voice.channel and ctx.author.voice:
-        await loading_msg.edit(content="Bot already in another voice channel!")
-        return False, "Bot already in another voice channel!"
+    # called=True: invoked by play(), which reports failures itself.
+    err = await _connect_to_author(ctx)
+    if err is not None:
+        if not called:
+            await ctx.send(err)
+        return False, err
+    if not called:
+        await ctx.send(f"Joined {ctx.voice_client.channel}!")
+    return True, "Success"
 
 @bot.hybrid_command(name='disconnect', description="Leaves your voice channel", aliases=['nikal', 'leave'])
 async def dc(ctx: commands.Context):
@@ -756,6 +849,13 @@ async def dc(ctx: commands.Context):
 
     # if author and bot are in same VC
     elif ctx.author.voice.channel == bot_voice.channel:
+        # An explicit leave drops the in-flight song: a later /play or
+        # /resume shouldn't drag it back.
+        st = _states.get(ctx.guild.id)
+        if st is not None:
+            _bump_generation(ctx.guild.id)
+            st.current = None
+        _autopaused.discard(ctx.guild.id)
         await ctx.send("Leaving!")
         await bot_voice.disconnect()
 
@@ -774,7 +874,6 @@ async def shayari(ctx: commands.Context):
 async def play(ctx: commands.Context, *, query=None):
 
     loading_msg = await ctx.send("Loading...")
-    bot_voice = discord.utils.get(bot.voice_clients, guild=ctx.guild)
 
     # Optional trailing "shuffle" keyword: shuffle a multi-song add (YT/
     # Spotify/Apple Music playlist) among itself. Only the newly-added items
@@ -785,47 +884,54 @@ async def play(ctx: commands.Context, *, query=None):
         if m:
             shuffle = True
             query = query[:m.start()].strip()
-        if not query:
-            return await ctx.send("No query given!")
+    query = (query or "").strip() or None
 
-    connect_flag, message = await join(ctx, bot_voice=bot_voice, loading_msg=loading_msg, called=True)
-    # connects bot to vc if not there
-    if connect_flag:
-        # if connection succeeds then searches if the guild already has an active queue
-        if not GuildQueue.exists(ctx.guild.id):
-            # if not then creates a queue and registers it. __init__ may RESTORE
-            # a previously-saved queue (persistence), so "no query" can now mean
-            # "resume the saved queue" rather than "you forgot the song".
-            Queue_Object = GuildQueue(ctx.guild.id)
-            if query is None or query.strip() == "":
-                if Queue_Object.is_queue_empty():
-                    return await ctx.send("No query given!")
-                return await play_next_song(ctx)  # restored queue: resume it
-        else:
-            # if yes then initialise the variable to it
-            Queue_Object = GuildQueue.instances[ctx.guild.id]
-            # if there is a queue and play is given without any query then continue playing from queue
-            if query is None or query.strip() == "":
-                return await play_next_song(ctx)
+    # Resolve the link BEFORE joining (a bad link shouldn't pull the bot into
+    # voice), and off the event loop: playlist pagination is many blocking
+    # HTTP calls, and on the loop it froze voice and every other command.
+    items, is_video_id = [], False
+    if query is not None:
+        try:
+            items, is_video_id = await asyncio.to_thread(request, query)
+        except Exception:
+            logger.exception("play: lookup failed for %r", query)
+            items = []
+        if not items:
+            return await loading_msg.edit(content="Couldn't find anything for that. Check the link and try again.")
 
-        items, is_video_id = request(query)
-        if shuffle and len(items) > 1:
-            random.shuffle(items)
-        for item in items:
-            Queue_Object.put_in_queue((item, is_video_id))
-        await loading_msg.edit(content=(f"Added {len(items)} songs shuffled to queue, now playing!"
-                                        if shuffle and len(items) > 1 else "Added to queue, now playing!"))
-        # Only start the queue if nothing is active. This was `or` (always
-        # true), so adding a song mid-song parked play_next_song for 120s,
-        # then force-started on top of the live player -> "Already playing
-        # audio" and the popped song was lost.
-        if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
-            return await play_next_song(ctx)
-
-    else:
-        # if connection fails then prints reason
+    pending = _paused_song_pending(ctx)
+    connect_flag, message = await join(ctx, loading_msg=loading_msg, called=True)
+    if not connect_flag:
         return await loading_msg.edit(content=message)
-    return
+
+    Queue_Object = _guild_queue(ctx.guild.id)
+    if shuffle and len(items) > 1:
+        random.shuffle(items)
+    for item in items:
+        Queue_Object.put_in_queue((item, is_video_id))
+    added = (f"Added {len(items)} songs shuffled to queue" if shuffle and len(items) > 1
+             else f"Added {len(items)} songs to queue" if len(items) > 1
+             else "Added to queue" if items else None)
+
+    # A song interrupted mid-play (auto-leave / lost voice) wins over the
+    # queue: pick it up where it stopped; anything just added plays after.
+    if pending:
+        if added:
+            await ctx.send(f"{added}. Picking up the paused song first.")
+        await _restart_current(ctx, loading_msg)
+        return
+
+    if query is None and Queue_Object.is_queue_empty():
+        return await loading_msg.edit(content="Nothing in the queue. Give me a song.")
+    # Only start the queue if nothing is active. This was `or` (always
+    # true), so adding a song mid-song parked play_next_song for 120s,
+    # then force-started on top of the live player -> "Already playing
+    # audio" and the popped song was lost.
+    idle = not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused()
+    if not idle:
+        return await loading_msg.edit(content=f"{added}." if added else "Already playing.")
+    await loading_msg.edit(content=f"{added}, now playing!" if added else "Resuming the queue!")
+    return await play_next_song(ctx)
 
 def _make_playback_callbacks(ctx, st, ytid, watch_url, duration, gen):
     """Build the after(error) callback for a song that is about to play.
@@ -894,6 +1000,7 @@ def _make_playback_callbacks(ctx, st, ytid, watch_url, duration, gen):
         if not vc.is_connected():
             # Voice dropped, not the stream. Wait for voice auto-reconnect
             # (up to 30s) before resuming; abort if a user action landed.
+            break_pos = st.pos.seconds()
             logger.warning("stream error for %s while voice not connected: %s", ytid, error)
             for _ in range(30):
                 await asyncio.sleep(1)
@@ -902,12 +1009,17 @@ def _make_playback_callbacks(ctx, st, ytid, watch_url, duration, gen):
                 if vc.is_connected():
                     break
             else:
-                logger.error("voice did not reconnect within 30s for %s; skipping", ytid)
+                # Hold the song at the break point instead of skipping it:
+                # st.current stays set, so /resume (or /play) re-joins and
+                # picks it up from here.
+                logger.error("voice did not reconnect within 30s for %s; holding at %.1fs for /resume",
+                             ytid, break_pos)
+                st.pos.seek_to(break_pos)
+                st.pos.pause()
                 try:
-                    await ctx.send("Voice connection lost — skipping this song.")
+                    await ctx.send("Lost the voice connection. `/resume` picks up where it left off.")
                 except Exception:
                     pass
-                await play_next_song(ctx)
                 return
         if count_retry:
             st.retries += 1
@@ -1004,12 +1116,14 @@ async def play_audio(ctx: commands.Context, query, is_video_id):
     url, time = await asyncio.to_thread(ytpull, query, is_video_id)
     logger.debug("play_audio: ytpull -> url=%s duration=%s", url, time)
     if url is None:
-        await ctx.send(f"{ytvideolistnames([query])[0] if is_video_id else query} not found, skipping to next song")
+        name = (await asyncio.to_thread(ytvideolistnames, [query]))[0] if is_video_id else query
+        await ctx.send(f"{name} not found, skipping to next song")
         return False
 
     source = await audiostream(url, loop=bot.loop, stream=True)
     if source is None:
-        await ctx.send(f"{ytvideolistnames([query])[0] if is_video_id else query} not found, skipping to next song")
+        name = (await asyncio.to_thread(ytvideolistnames, [query]))[0] if is_video_id else query
+        await ctx.send(f"{name} not found, skipping to next song")
         return False
     data = source[1]
     # empty/invisible titles: use "_" as a visible placeholder. Whitespace-only
@@ -1072,8 +1186,14 @@ async def play_next_song(ctx: commands.Context):
                 break
             waited += 1.0
             if waited >= PLAY_WAIT_TIMEOUT:
-                logger.error("play_next_song: player still active after %.0fs; forcing advance", waited)
-                break
+                # Still playing after the timeout: a long song, or a second
+                # waiter. Don't force a new song on top of it — vc.play()
+                # would raise "Already playing audio" after the next song was
+                # already popped (lost). The playing song's own after-callback
+                # advances the queue when it ends.
+                logger.warning("play_next_song: player still active after %.0fs; leaving the "
+                               "advance to its after-callback", waited)
+                return
         if waited:
             logger.debug("play_next_song: waited %.0fs for the previous player to stop", waited)
 
@@ -1139,61 +1259,43 @@ async def pause(ctx: commands.Context):
         await ctx.send("Nothing is playing.")
 
 # resumes music
-@bot.hybrid_command(name='resume', description="Resumes playback", aliases=['chal'], pass_context=True)
+@bot.hybrid_command(name='resume', description="Resumes playback, joining your voice channel if needed", aliases=['chal'], pass_context=True)
 async def resume(ctx: commands.Context):
-    if ctx.voice_client:
-        if ctx.voice_client.is_paused():
-            ctx.voice_client.resume()
+    vc = ctx.voice_client
+    if vc is not None and vc.is_connected():
+        if ctx.author.voice is None or ctx.author.voice.channel != vc.channel:
+            return await ctx.send("Can't join your voice channel right now.")
+        if vc.is_paused():
+            vc.resume()
             st = _states.get(ctx.guild.id)
             if st is not None:
                 st.pos.resume()
-            await ctx.send("Resumed!")
-        else:
-            await ctx.send("Music already playing. Do you mean to pause?")
-        return
+            _autopaused.discard(ctx.guild.id)
+            return await ctx.send("Resumed!")
+        if vc.is_playing():
+            return await ctx.send("Music already playing. Do you mean to pause?")
+        # Connected but idle: kick the queue if it has anything.
+        if not _guild_queue(ctx.guild.id).is_queue_empty():
+            await ctx.send("Resuming the queue!")
+            return await play_next_song(ctx)
+        return await ctx.send("Nothing to resume. Use `/play` to add a song.")
 
-    # No voice client. Auto-leave dropped us from voice with a song in flight:
-    # re-join the requester's VC and restart THAT song from the frozen
-    # position. The song is not in the queue (popped when it started), so the
-    # queue can't restart it — the position lives on the SongState.
-    st = _states.get(ctx.guild.id)
-    if st is not None and st.current is not None:
-        if ctx.author.voice is None:
-            return await ctx.send("Join a voice channel first, then `annu resume`.")
-        song = st.current
-        pos = st.pos.seconds()
-        loading = await ctx.send(f"Rejoining at {int(pos // 60)}:{int(pos % 60):02d}...")
-        await ctx.author.voice.channel.connect()
-        # Bump so any stale callback from before the disconnect no-ops; the
-        # position clock restarts reading exactly at the paused second.
-        st = _bump_generation(ctx.guild.id)
-        st.pos.seek_to(pos)
-        fresh = await audiostream(song['url'], loop=bot.loop, stream=True, start=pos)
-        if fresh is None:
-            st.current = None
-            return await loading.edit(content="Couldn't restart that stream — use `annu play` to start fresh.")
-        # The extract above awaited; a skip/play may have replaced this song in
-        # the meantime. If so, drop the recovery — the new song owns the player.
-        if _states.get(ctx.guild.id) is None or _states[ctx.guild.id].generation != st.generation:
-            try:
-                fresh[0].cleanup()
-            except Exception:
-                pass
-            return
-        after_cb = _make_playback_callbacks(ctx, st, song['ytid'], song['url'],
-                                            song['duration'], st.generation)
-        try:
-            ctx.voice_client.play(fresh[0], after=after_cb)
-        except discord.ClientException as e:
-            try:
-                fresh[0].cleanup()
-            except Exception:
-                pass
-            return await loading.edit(content=f"Couldn't resume ({type(e).__name__}).")
-        _autopaused.discard(ctx.guild.id)
-        await loading.edit(content=f"Resumed at {int(pos // 60)}:{int(pos % 60):02d}.")
+    # Not in voice (auto-leave, lost connection, restart): join the author
+    # and pick up the interrupted song, or else continue the queue. Check
+    # there's something to play BEFORE joining.
+    pending = _paused_song_pending(ctx)
+    queue_has_songs = not _guild_queue(ctx.guild.id).is_queue_empty()
+    if not pending and not queue_has_songs:
+        return await ctx.send("Nothing to resume. Use `/play` to add a song.")
+    err = await _connect_to_author(ctx)
+    if err is not None:
+        return await ctx.send(err)
+    if pending:
+        loading = await ctx.send("Picking up where it left off...")
+        await _restart_current(ctx, loading)
         return
-    await ctx.send("Nothing is playing. If you want to restart existing queue type just annu play")
+    await ctx.send("Resuming the queue!")
+    await play_next_song(ctx)
 
 # skips current song
 @bot.hybrid_command(name='skip', description="Skips to next song", aliases=['next', 'agla'], pass_context=True)
@@ -1265,8 +1367,8 @@ async def display_queue(ctx: commands.Context):
     # Extract video_ids from corresponding values
     values_to_process = [t[0] for t in true_tuples]
 
-    # gets names of the videos with given video ids
-    processed_values = ytvideolistnames(values_to_process)
+    # gets names of the videos with given video ids (blocking HTTP: off the loop)
+    processed_values = await asyncio.to_thread(ytvideolistnames, values_to_process)
 
     queuearray = []
     queueelem = ""
@@ -1305,31 +1407,9 @@ async def display_queue(ctx: commands.Context):
 
 @bot.hybrid_command(name='fangs', description="Plays Sheishen by Keylo X FANGS", hidden=True)
 async def fangs(ctx: commands.Context):
-
-    # flag to check if bot is connected to a VC
-    connect_flag = False
-    if ctx.voice_client is None:  # if bot not in vc
-        if ctx.author.voice:  # if author in vc then join authors
-            await ctx.author.voice.channel.connect()
-            connect_flag = True
-        else:
-            await ctx.send("Join a VC first!")
-    elif ctx.author.voice.channel == ctx.voice_client.channel:  # if bot in same vc as author
-        connect_flag = True
-    else:
-        await ctx.send("Join the bot's VC!")
-
-    if connect_flag:
-        seishin = "https://youtu.be/gBmxCcHtY2Y"
-        time = "3:25"
-        source = await audiostream(seishin, loop=bot.loop, stream=True)
-        data = source[1]
-        title = data['title']
-        ytid = data['id']
-        ctx.voice_client.play(source[0], after=lambda e: print('Player error: %s' % e) if e else None)
-        playerembed.set_image(url=data['thumbnail'])
-        playerembed.description = f"[{title}]({ytbase}{ytid}) [{time}]"
-        await ctx.send(embed=playerembed)
+    # Goes through the normal queue like any /play: no more playing over the
+    # current song, and the same voice-channel checks.
+    await ctx.invoke(play, query="https://youtu.be/gBmxCcHtY2Y")
 
 
 @bot.hybrid_command(name='fuckoff', description="Try it ;)", pass_context=True)
@@ -1394,10 +1474,12 @@ async def help(ctx: commands.Context):
     "`skip [next, agla] <number>:` Goes to next song or to the index specified\n"
     "`join [connect]:` Connects to your voice channel\n"
     "`pause [ruk]:` Pauses playback\n"
-    "`resume [chal]:` Resumes playback\n"
+    "`resume [chal]:` Resumes playback, joining your voice channel if needed\n"
     "`shuffle`: Shuffles queue\n"
     "`clear`: Clears queue\n"
     "`disconnect [nikal, leave]:` Disconnect from voice channel\n"
+    "`setchannel [#channel]:` Admin: only respond in that channel (default: this one)\n"
+    "`clearchannel:` Admin: respond in any channel again\n"
     "`config [setchannel, setadminrole ...]:` Admin: configure working channel + admin roles\n"
     "`fuckoff:` Don't do this.\n"
     "`help:` Shows this message"

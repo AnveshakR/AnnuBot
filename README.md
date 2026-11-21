@@ -15,7 +15,9 @@ Prefix for this bot is **annu**
 - `skip [next, agla] <number>:` Goes to next song or to the index specified
 - `join [connect]:` Connects to your voice channel
 - `pause [ruk]:` Pauses playback
-- `resume [chal]:` Resumes playback
+- `resume [chal]:` Resumes playback (joins your voice channel if needed, and picks up a song interrupted by auto-leave or a dropped connection)
+- `setchannel [#channel]:` Admin: only respond in that channel (defaults to the current one)
+- `clearchannel:` Admin: respond in any channel again
 - `shuffle`: Shuffles queue\n
 - `clear`: Clears queue\n
 - `disconnect [nikal, leave]:` Disconnect from voice channel

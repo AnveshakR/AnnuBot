@@ -7,11 +7,17 @@ import unicodedata
 from urllib.parse import urlparse
 import logging
 from typing import Tuple
+from concurrent.futures import ThreadPoolExecutor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 load_dotenv()
+
+# Upper bound on songs taken from one playlist/album link. Pagination makes
+# huge playlists possible; this keeps a 5000-song playlist from eating the
+# YouTube API quota and flooding the queue.
+MAX_PLAYLIST_ITEMS = 500
 
 YT_KEY = os.getenv('YT_KEY')
 SPOTIFY_ID = os.getenv('SPOTIFY_ID')
@@ -68,16 +74,23 @@ def ytvideolistnames(video_ids) -> list:
     if not video_ids:
         return []
     titles = {}
-    for i in range(0, len(video_ids), 50):
-        batch = video_ids[i:i + 50]
+
+    def fetch(batch):
         try:
             r = requests.get("https://youtube.googleapis.com/youtube/v3/videos",
                              params={'part': 'snippet', 'id': ','.join(batch), 'key': YT_KEY},
                              timeout=10).json()
-            for item in r['items']:
-                titles[item['id']] = item['snippet']['title']
+            return {item['id']: item['snippet']['title'] for item in r['items']}
         except Exception as e:
             logger.error(f"ytvideolistnames failed: {type(e).__name__}: {_redact(e)}")
+            return {}
+
+    batches = [video_ids[i:i + 50] for i in range(0, len(video_ids), 50)]
+    # Batches are independent, so fetch them in parallel (a 500-song queue
+    # is 10 requests).
+    with ThreadPoolExecutor(max_workers=min(5, len(batches))) as pool:
+        for part in pool.map(fetch, batches):
+            titles.update(part)
     return [titles.get(vid, f"Video {vid}") for vid in video_ids]
 
 def format_duration(iso: str) -> str:
@@ -235,22 +248,33 @@ def spotifypull(uri, link_type) -> list:
 
     # handles abstracted spotify .link links by getting the redirected url
     if link_type == 'any':
-        return request(requests.get(f"https://spotify.link/{uri}").url)[0]
+        return request(requests.get(f"https://spotify.link/{uri}", timeout=10).url)[0]
 
     else:
         auth_response = requests.post(auth_url, {
         'grant_type': 'client_credentials',
         'client_id': SPOTIFY_ID,
         'client_secret': SPOTIFY_SECRET,
-        })
+        }, timeout=10)
 
         auth_response_data = auth_response.json()
-        access_token = auth_response_data['access_token']
+        access_token = auth_response_data.get('access_token')
+        if not access_token:
+            # e.g. invalid_client: the app's client id/secret were rotated or
+            # the Spotify app was deleted. Fix SPOTIFY_ID/SPOTIFY_SECRET.
+            logger.error(f"spotifypull: Spotify auth failed: HTTP {auth_response.status_code} "
+                         f"{auth_response_data.get('error')!r} {auth_response_data.get('error_description')!r}")
+            return []
         headers = {
             'Authorization': 'Bearer {token}'.format(token=access_token)
         }
         # gets response based on type of spotify link
-        r = requests.get(spotify_base.format(link_type=link_type, id=uri), headers=headers)
+        r = requests.get(spotify_base.format(link_type=link_type, id=uri), headers=headers, timeout=10)
+        if r.status_code != 200:
+            # e.g. 404 for Spotify-owned editorial/algorithmic playlists,
+            # which client-credentials apps can't read.
+            logger.error(f"spotifypull {link_type}/{uri}: HTTP {r.status_code}: {r.text[:300]!r}")
+            return []
         r = r.json()
         # return song based on link type
         song_names = []
@@ -258,18 +282,30 @@ def spotifypull(uri, link_type) -> list:
         if link_type == 'tracks':
             artist_names = ', '.join(artist['name'] for artist in r['artists'])
             song_names.append(f"{r['name']} by {artist_names}")
-        elif link_type == 'playlists':
-            for i in r['tracks']['items']:
-                if not i.get('track'):
-                    continue  # removed/unavailable track: Spotify returns track=null
-                artist_names = ', '.join(artist['name'] for artist in i['track']['artists'])
-                song_names.append(f"{i['track']['name']} by {artist_names}")
-        elif link_type == 'albums':
-            for i in r['tracks']['items']:
-                artist_names = ', '.join(artist['name'] for artist in i['artists'])
-                song_names.append(f"{i['name']} by {artist_names}")
+        elif link_type in ('playlists', 'albums'):
+            # Paginated: the first page is embedded in r['tracks'] (100 for
+            # playlists, 50 for albums); follow 'next' for the rest.
+            page = r['tracks']
+            while True:
+                for i in page.get('items') or []:
+                    # playlist items wrap the track (and it can be null for a
+                    # removed/unavailable track); album items ARE the track.
+                    t = i.get('track') if link_type == 'playlists' else i
+                    if not t:
+                        continue
+                    artist_names = ', '.join(artist['name'] for artist in t['artists'])
+                    song_names.append(f"{t['name']} by {artist_names}")
+                nxt = page.get('next')
+                if not nxt or len(song_names) >= MAX_PLAYLIST_ITEMS:
+                    break
+                resp = requests.get(nxt, headers=headers, timeout=10)
+                if resp.status_code != 200:
+                    logger.error(f"spotifypull page fetch: HTTP {resp.status_code}; "
+                                 f"keeping the {len(song_names)} tracks loaded so far")
+                    break
+                page = resp.json()
 
-        return song_names
+        return song_names[:MAX_PLAYLIST_ITEMS]
 
 # ---- Apple Music -------------------------------------------------------
 # Developer token (ES256 JWT) is cached and regenerated when it's within
@@ -317,12 +353,26 @@ def applemusicpull(storefront, uri, link_type) -> list:
     if link_type == 'songs':
         song_names.append(f"{attrs.get('name')} by {attrs.get('artistName')}")
     elif link_type in ('playlists', 'albums'):
-        tracks = data.get('relationships', {}).get('tracks', {}).get('data', [])
-        for t in tracks:
-            tattrs = t.get('attributes', {})
-            song_names.append(f"{tattrs.get('name')} by {tattrs.get('artistName')}")
+        rel = data.get('relationships', {}).get('tracks', {})
+        while True:
+            for t in rel.get('data') or []:
+                tattrs = t.get('attributes', {})
+                song_names.append(f"{tattrs.get('name')} by {tattrs.get('artistName')}")
+            # Paginated: the embedded relationship holds the first page
+            # (100 tracks); 'next' is a path relative to the API host.
+            nxt = rel.get('next')
+            if not nxt or len(song_names) >= MAX_PLAYLIST_ITEMS:
+                break
+            try:
+                resp = requests.get(f"https://api.music.apple.com{nxt}", headers=headers, timeout=10)
+                resp.raise_for_status()
+                rel = resp.json()
+            except Exception as e:
+                logger.error(f"applemusicpull page fetch failed ({e}); "
+                             f"keeping the {len(song_names)} tracks loaded so far")
+                break
 
-    return song_names
+    return song_names[:MAX_PLAYLIST_ITEMS]
 
 # checks if link is a youtube link
 def is_youtube_link(query) -> bool:
@@ -362,11 +412,33 @@ def request(query) -> Tuple[list, bool]:
             video_id = query.split("v=")[-1].split("&")[0]
         
         video_links = []
-        # get items in playlist
+        # get items in playlist. Paginated (50 per page, chained by
+        # nextPageToken, so pages can't be fetched in parallel).
         if playlist_id is not None:
-            r = requests.get(f"https://youtube.googleapis.com/youtube/v3/playlistItems?part=content_details&maxResults=50&playlistId={playlist_id}&key={YT_KEY}").json()
-            for items in r['items']:
-                video_links.append(items['contentDetails']['videoId'])
+            page_token = None
+            while len(video_links) < MAX_PLAYLIST_ITEMS:
+                params = {'part': 'contentDetails', 'maxResults': 50,
+                          'playlistId': playlist_id, 'key': YT_KEY}
+                if page_token:
+                    params['pageToken'] = page_token
+                try:
+                    r = requests.get("https://youtube.googleapis.com/youtube/v3/playlistItems",
+                                     params=params, timeout=10).json()
+                except Exception as e:
+                    logger.error(f"playlist {playlist_id}: page fetch failed: {type(e).__name__}: {_redact(e)}")
+                    break
+                if 'error' in r:
+                    logger.error(f"playlist {playlist_id}: API error {r['error'].get('code')} "
+                                 f"{r['error'].get('message')!r}")
+                    break
+                for items in r.get('items') or []:
+                    vid = (items.get('contentDetails') or {}).get('videoId')
+                    if vid:
+                        video_links.append(vid)
+                page_token = r.get('nextPageToken')
+                if not page_token:
+                    break
+            video_links = video_links[:MAX_PLAYLIST_ITEMS]
         elif video_id is not None:
             video_links.append(video_id)
         return video_links, True
