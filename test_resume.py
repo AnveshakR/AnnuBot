@@ -204,6 +204,18 @@ def main():
     assert "shuffled" in ctx.log[-1], ctx.log
     print("PASS 9: playlist added shuffled while playing; no second song started")
 
+    # 10. slash shuffle option + mix dedupe (YouTube RD mixes repeat songs across pages)
+    calls = []; stub(calls)
+    A.request = lambda q: (['a', 'b', 'c', 'a', 'b', 'c', 'a'], True)
+    g = fresh_guild(10); vch = VoiceChannel(g, "General")
+    g.vc = FakeVC(g, vch); g.vc.playing = True
+    ctx = Ctx(g, vch)
+    run(A.play.callback(ctx, query='https://youtube.com/watch?v=a&list=RDa', shuffle=True))
+    q = [x[0] for x in A.GuildQueue.instances[10].display_queue()]
+    assert sorted(q) == ['a', 'b', 'c'], q
+    assert ctx.log[-1] == "Added 3 songs and shuffled them (4 repeats skipped).", ctx.log
+    print("PASS 10: shuffle option works; mix repeats skipped; reply says so")
+
     print("\nALL PLAY/RESUME TESTS PASSED")
 
 

@@ -9,9 +9,9 @@ Prefix for this bot is **annu**
 > *Now supports slash commands!*
 
 ## Commands
-- `play [baja]:`Plays song/playlist/album from YT and Apple Music (Spotify support is disabled). Append `shuffle` to add a playlist shuffled (e.g. `annu play <playlist link> shuffle`)
+- `play [baja]:`Plays song/playlist/album from YT and Apple Music (Spotify support is disabled). To shuffle a playlist, set the `shuffle` option on `/play`, or end a prefix command with `shuffle` (e.g. `annu play <playlist link> shuffle`). Repeated songs in a playlist (e.g. YouTube mixes) are added once.
 - `irshad [sher]:` Get an authentic Annu Malik shayari!
-- `queue:` Shows the current queue
+- `queue [page]:` Shows the queue, 20 songs per page
 - `skip [next, agla] <number>:` Goes to next song or to the index specified
 - `join [connect]:` Connects to your voice channel
 - `pause [ruk]:` Pauses playback

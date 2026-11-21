@@ -871,14 +871,15 @@ async def shayari(ctx: commands.Context):
 
 # play song based on youtube or apple music links, or a general query
 @bot.hybrid_command(name='play', description="Plays song/playlist from YouTube or Apple Music. Append 'shuffle' to shuffle a playlist.", aliases=['baja'], pass_context=True)
-async def play(ctx: commands.Context, *, query=None):
+async def play(ctx: commands.Context, *, query=None, shuffle: bool = False):
 
     loading_msg = await ctx.send("Loading...")
 
-    # Optional trailing "shuffle" keyword: shuffle a multi-song add (YT/
-    # Apple Music playlist) among itself. Only the newly-added items
-    # are shuffled — the rest of the queue keeps its order.
-    shuffle = False
+    # Shuffle a multi-song add (YT/Apple Music playlist) among itself. Only
+    # the newly-added items are shuffled — the rest of the queue keeps its
+    # order. Slash: the `shuffle` option (Discord drops any text typed after
+    # the query field). Prefix: a trailing "shuffle" word (`query` consumes
+    # the rest of the message, so `shuffle` itself is never filled there).
     if query:
         m = re.search(r"\s+shuffle\s*$", query, re.IGNORECASE)
         if m:
@@ -907,13 +908,20 @@ async def play(ctx: commands.Context, *, query=None):
         return await loading_msg.edit(content=message)
 
     Queue_Object = _guild_queue(ctx.guild.id)
+    # Drop repeats within one add: YouTube mixes (list=RD...) page through
+    # the same ~50 songs over and over (a 500-item mix was 54 unique songs).
+    found = len(items)
+    items = list(dict.fromkeys(items))
     if shuffle and len(items) > 1:
         random.shuffle(items)
     for item in items:
         Queue_Object.put_in_queue((item, is_video_id))
-    added = (f"Added {len(items)} songs shuffled to queue" if shuffle and len(items) > 1
-             else f"Added {len(items)} songs to queue" if len(items) > 1
-             else "Added to queue" if items else None)
+    if len(items) > 1:
+        added = f"Added {len(items)} songs" + (" and shuffled them" if shuffle else "")
+        if found > len(items):
+            added += f" ({found - len(items)} repeats skipped)"
+    else:
+        added = "Added to queue" if items else None
 
     # A song interrupted mid-play (auto-leave / lost voice) wins over the
     # queue: pick it up where it stopped; anything just added plays after.
@@ -1350,62 +1358,40 @@ async def skip(ctx: commands.Context, *, query=""):
     # else play the next song - after callback handles this
     return await ctx.send("Skipped!")
 
-# displays queue
-@bot.hybrid_command(name='queue', description="Displays song queue", pass_context=True)
-async def display_queue(ctx: commands.Context):
-    # checks if the guild already has an active queue
-    if not GuildQueue.exists(ctx.guild.id):
+QUEUE_PAGE_SIZE = 20
+
+# displays queue, one page per message
+@bot.hybrid_command(name='queue', description="Displays the song queue (20 per page)", pass_context=True)
+async def display_queue(ctx: commands.Context, page: int = 1):
+    Queue_Object = GuildQueue.instances.get(ctx.guild.id)
+    queuelist = Queue_Object.display_queue() if Queue_Object is not None else None
+    if not queuelist:
         return await ctx.send("No songs in queue.")
-    else:
-        # if yes then initialise the variable to it
-        Queue_Object = GuildQueue.instances[ctx.guild.id]
-        queuelist = Queue_Object.display_queue()
-        if queuelist is None:
-            return await ctx.send("No songs in queue.")
 
-    # gets the values which are YT links
-    true_tuples = [t for t in queuelist if t[1]]
+    total = len(queuelist)
+    pages = (total + QUEUE_PAGE_SIZE - 1) // QUEUE_PAGE_SIZE
+    page = min(max(page, 1), pages)
+    first = (page - 1) * QUEUE_PAGE_SIZE
+    shown = queuelist[first:first + QUEUE_PAGE_SIZE]
 
-    # Extract video_ids from corresponding values
-    values_to_process = [t[0] for t in true_tuples]
+    # Titles only for this page's YouTube entries (one API call, off the loop).
+    ids = [q for q, is_vid in shown if is_vid]
+    titles = dict(zip(ids, await asyncio.to_thread(ytvideolistnames, ids)))
 
-    # gets names of the videos with given video ids (blocking HTTP: off the loop)
-    processed_values = await asyncio.to_thread(ytvideolistnames, values_to_process)
-
-    queuearray = []
-    queueelem = ""
-    # NOTE: processed_values can be SHORTER than the number of YT entries if the
-    # YouTube API fails to resolve some IDs (deleted/region-locked videos are
-    # omitted from the response). pop(0) in lockstep then runs off the end and
-    # raised IndexError (seen 3x in the Aug 31 logs). Use an iterator and fall
-    # back to the raw value when names run out.
-    name_iter = iter(processed_values)
-    # Iterate over the original queue
-    for num, item in enumerate(queuelist):
-        temp_name = ""
-        # if the value is a YT link, get the value from the names list
-        if item[1]:
-            try:
-                temp_name = next(name_iter)
-            except StopIteration:
-                temp_name = item[0]  # name lookup fell short; use the raw link
-        # else just append the value as it is
-        else:
-            temp_name = item[0]
-
-        # discord has a message character limit of 2000 character, so we separate them by length
-        if len(queueelem) + len(f"{num+1}) {temp_name}\n") <= 2000:
-            queueelem += f"{num+1}) {temp_name}\n"
-        else:
-            queuearray.append(queueelem)
-            queueelem = ""
-    if queueelem != "":
-        queuearray.append(queueelem)
-
-    for i in queuearray:
-        await ctx.send(i)
-
-    return
+    lines = []
+    for num, (q, is_vid) in enumerate(shown, start=first + 1):
+        name = titles.get(q, q) if is_vid else q
+        if len(name) > 80:
+            name = name[:79] + "…"
+        lines.append(f"{num}) {name}")
+    header = f"**Queue: {total} song{'s' if total != 1 else ''}**" + (f" (page {page}/{pages})" if pages > 1 else "")
+    footer = f"\n`/queue page:{page + 1}` for more" if page < pages else ""
+    msg = header + "\n" + "\n".join(lines) + footer
+    # 20 lines x ~85 chars stays under Discord's 2000-char cap; trim if not.
+    while len(msg) > 2000 and lines:
+        lines.pop()
+        msg = header + "\n" + "\n".join(lines) + footer
+    await ctx.send(msg)
 
 @bot.hybrid_command(name='fangs', description="Plays Sheishen by Keylo X FANGS", hidden=True)
 async def fangs(ctx: commands.Context):
@@ -1470,9 +1456,9 @@ async def help(ctx: commands.Context):
     helpembed.title = "Annu Commands"
     helpembed.color = discord.Colour(0x7289DA)
     helpembed.description = (
-    "`play [baja]:` Plays song/playlist from YouTube or Apple Music (append `shuffle` to add a playlist shuffled)\n"
+    "`play [baja]:` Plays song/playlist from YouTube or Apple Music (set the `shuffle` option, or end a prefix command with `shuffle`, to shuffle a playlist)\n"
     "`irshad [sher]:` Get an authentic Annu Malik shayari!\n"
-    "`queue:` Shows the current queue\n"
+    "`queue [page]:` Shows the queue, 20 songs per page\n"
     "`skip [next, agla] <number>:` Goes to next song or to the index specified\n"
     "`join [connect]:` Connects to your voice channel\n"
     "`pause [ruk]:` Pauses playback\n"
