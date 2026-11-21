@@ -758,7 +758,7 @@ async def shayari(ctx: commands.Context):
     await ctx.send(f'Annu says: {random.choice(sher)}')
 
 # play song based on youtube or spotify links, or a general query
-@bot.hybrid_command(name='play', description="Plays your song by name/YT/Spotify/Apple Music URL or resumes playing from queue if no query given. Append 'shuffle' to add a playlist shuffled.", aliases=['baja'], pass_context=True)
+@bot.hybrid_command(name='play', description="Plays song/playlist from YT, Spotify, Apple Music. Append 'shuffle' to shuffle a playlist.", aliases=['baja'], pass_context=True)
 async def play(ctx: commands.Context, *, query=None):
 
     loading_msg = await ctx.send("Loading...")
