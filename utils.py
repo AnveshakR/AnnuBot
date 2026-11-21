@@ -58,18 +58,27 @@ def clean_title(title, fallback="Untitled"):
     return text if text else fallback
 
 def ytvideolistnames(video_ids) -> list:
+    """Titles for video_ids, aligned 1:1 with the input.
+
+    The API caps `id` at 50 per request (more -> 400, which used to surface
+    as KeyError: 'items' and turn the whole /queue into "Video <id>"), and it
+    silently omits deleted/private videos, which shifted every later title
+    onto the wrong entry. So: batch by 50 and map titles back by id.
+    """
     if not video_ids:
         return []
-    query = '&id='+'&id='.join(video_ids)
-    try:
-        r = requests.get(f"https://youtube.googleapis.com/youtube/v3/videos?part=snippet{query}&key={YT_KEY}", timeout=10).json()
-        names = []
-        for item in r['items']:
-            names.append(item['snippet']['title'])
-        return names
-    except Exception as e:
-        logger.error(f"ytvideolistnames failed: {type(e).__name__}: {_redact(e)}")
-        return [f"Video {vid}" for vid in video_ids]
+    titles = {}
+    for i in range(0, len(video_ids), 50):
+        batch = video_ids[i:i + 50]
+        try:
+            r = requests.get("https://youtube.googleapis.com/youtube/v3/videos",
+                             params={'part': 'snippet', 'id': ','.join(batch), 'key': YT_KEY},
+                             timeout=10).json()
+            for item in r['items']:
+                titles[item['id']] = item['snippet']['title']
+        except Exception as e:
+            logger.error(f"ytvideolistnames failed: {type(e).__name__}: {_redact(e)}")
+    return [titles.get(vid, f"Video {vid}") for vid in video_ids]
 
 def format_duration(iso: str) -> str:
     """Format a YouTube Data API ISO 8601 duration (e.g. PT2H34M, PT2M34S)
@@ -251,6 +260,8 @@ def spotifypull(uri, link_type) -> list:
             song_names.append(f"{r['name']} by {artist_names}")
         elif link_type == 'playlists':
             for i in r['tracks']['items']:
+                if not i.get('track'):
+                    continue  # removed/unavailable track: Spotify returns track=null
                 artist_names = ', '.join(artist['name'] for artist in i['track']['artists'])
                 song_names.append(f"{i['track']['name']} by {artist_names}")
         elif link_type == 'albums':

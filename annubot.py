@@ -346,7 +346,19 @@ class GuildQueue:
 
     def _save(self):
         """Atomically persist ALL guilds' queues (in-memory + this file)."""
+        # Start from what's on disk: a guild whose queue hasn't been loaded
+        # into memory yet this process (nobody has used the bot there since
+        # the restart) must keep its saved queue, not be wiped by another
+        # guild's save.
         data = {}
+        try:
+            with open(self._queue_path, encoding='utf-8') as f:
+                on_disk = json.load(f)
+            if isinstance(on_disk, dict):
+                data = {k: v for k, v in on_disk.items()
+                        if not k.isdigit() or int(k) not in GuildQueue.instances}
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
         for gid, q in GuildQueue.instances.items():
             if not q.is_queue_empty():
                 data[str(gid)] = [[item[0], bool(item[1])] for item in q.display_queue()]
@@ -803,7 +815,11 @@ async def play(ctx: commands.Context, *, query=None):
             Queue_Object.put_in_queue((item, is_video_id))
         await loading_msg.edit(content=(f"Added {len(items)} songs shuffled to queue, now playing!"
                                         if shuffle and len(items) > 1 else "Added to queue, now playing!"))
-        if not ctx.voice_client.is_playing() or not ctx.voice_client.is_paused():
+        # Only start the queue if nothing is active. This was `or` (always
+        # true), so adding a song mid-song parked play_next_song for 120s,
+        # then force-started on top of the live player -> "Already playing
+        # audio" and the popped song was lost.
+        if not ctx.voice_client.is_playing() and not ctx.voice_client.is_paused():
             return await play_next_song(ctx)
 
     else:
@@ -946,6 +962,15 @@ def _make_playback_callbacks(ctx, st, ytid, watch_url, duration, gen):
             except Exception:
                 pass
 
+    def _log_after_result(fut):
+        if fut.cancelled():
+            logger.warning("after-callback for %s was cancelled", ytid)
+            return
+        exc = fut.exception()
+        if exc is not None:
+            logger.error("after-callback for %s raised; queue may have stalled", ytid,
+                         exc_info=(type(exc), exc, exc.__traceback__))
+
     def after(error):
         # Called from the audio-player thread; hop onto the event loop.
         st = _states.get(ctx.guild.id)
@@ -963,15 +988,6 @@ def _make_playback_callbacks(ctx, st, ytid, watch_url, duration, gen):
         # stopped (Sept 24 21:51). Always log it.
         fut.add_done_callback(_log_after_result)
     return after
-
-    def _log_after_result(fut):
-        if fut.cancelled():
-            logger.warning("after-callback for %s was cancelled", ytid)
-            return
-        exc = fut.exception()
-        if exc is not None:
-            logger.error("after-callback for %s raised; queue may have stalled", ytid,
-                         exc_info=(type(exc), exc, exc.__traceback__))
 
 
 async def play_audio(ctx: commands.Context, query, is_video_id):
@@ -1217,7 +1233,7 @@ async def skip(ctx: commands.Context, *, query=""):
 
         Queue_Object = GuildQueue.instances[ctx.guild.id]
         # if given index is larger then length of queue then its invalid
-        if query > len(Queue_Object.display_queue()):
+        if query < 1 or query > len(Queue_Object.display_queue() or []):
             return await ctx.send("Invalid queue index.")
 
         # remove all songs before that index
