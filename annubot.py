@@ -239,6 +239,12 @@ class SongState:
         # Positions already resumed from after a tail drop (progress guard:
         # if the CDN keeps cutting the same tail, stop looping and advance).
         self.tail_resume_positions = []
+        # The song currently/last in flight: {'url', 'ytid', 'title',
+        # 'duration'}. Set by play_audio, cleared when the queue ends. Lets
+        # /resume restart THIS song (not the next queue item) after auto-leave
+        # drops the voice client mid-song — the playing song is NOT in the
+        # queue, it was popped when it started.
+        self.current: dict | None = None
 
 
 _states = {}
@@ -602,24 +608,20 @@ async def _do_leave(guild, channel):
     # only act if we're still in the same channel and it's still empty
     if vc is None or vc.channel is not channel or _empty_people(channel) != []:
         return
-    # If music is active, do NOT disconnect. disconnect() -> stop() kills the
-    # player, which fires on_finished() -> play_next_song(), eating the NEXT
-    # song from the queue (two songs lost, stream broken). Instead: pause (if
-    # playing) and stay in the VC; playback resumes when someone re-joins.
+    # Pause BEFORE leaving, preserving the exact second: the in-flight song
+    # is not in the queue (popped when it started), so record nothing extra —
+    # st.current and the frozen st.pos clock are enough for /resume to restart
+    # it. disconnect() -> stop() kills the player; the after-callback that
+    # fires sees no voice client and bails without touching the queue.
+    st = _states.get(guild.id)
     if vc.is_playing():
         vc.pause()
-        st = _states.get(guild.id)
         if st is not None:
             st.pos.pause()  # freeze position so resume recovers the right second
         _autopaused.add(guild.id)
-        logger.info(f"Empty VC in {guild} but music playing; paused, staying in {channel}")
-        return
-    if vc.is_paused():
-        # user manually paused; stay, don't touch the pause (no auto-resume)
-        logger.info(f"Empty VC in {guild} but music paused; staying in {channel}")
-        return
-    # nothing playing: safe to leave
-    logger.info(f"Empty VC in {guild} for {EMPTY_VC_LEAVE_DELAY}s, leaving")
+        logger.info(f"Empty VC in {guild} for {EMPTY_VC_LEAVE_DELAY}s; paused and leaving {channel}")
+    else:
+        logger.info(f"Empty VC in {guild} for {EMPTY_VC_LEAVE_DELAY}s; leaving (music stays paused)")
     try:
         if guild.system_channel is not None:
             await guild.system_channel.send(f"Leaving — it's been empty for {EMPTY_VC_LEAVE_DELAY}s.")
@@ -703,9 +705,12 @@ async def join(ctx: commands.Context, bot_voice=None, loading_msg=None, called=F
         # If the queue has songs from before the bot was dropped from voice
         # (e.g. after a "Voice connection lost — skipping this song"), start
         # advancing it now: play_next_song's "not connected to voice" path
-        # leaves songs queued, and nothing else would unblock them.
+        # leaves songs queued, and nothing else would unblock them. A song
+        # paused by auto-leave (st.current) is NOT popped here — /resume owns
+        # it, and popping the next queue song would skip over it.
         qo = GuildQueue.instances[ctx.guild.id]
-        if not qo.is_queue_empty():
+        st = _states.get(ctx.guild.id)
+        if (st is None or st.current is None) and not qo.is_queue_empty():
             asyncio.create_task(play_next_song(ctx))
         return True, "Success"
 
@@ -790,44 +795,18 @@ async def play(ctx: commands.Context, *, query=None):
         return await loading_msg.edit(content=message)
     return
 
-async def play_audio(ctx: commands.Context, query, is_video_id):
-    # plays audio and sends the embed into chat.
-    # Returns True once a song is actually playing, False if the song could
-    # not be resolved/extracted (caller advances the queue). MUST NOT call
-    # play_next_song itself: callers may already hold play_lock, and
-    # asyncio.Lock is not re-entrant — the old recursive call deadlocked the
-    # whole queue on the first "not found" song (freeze: nothing could
-    # pause/resume/skip).
-    logger.info("play_audio: guild %s, query=%r is_video_id=%s", ctx.guild.id, query, is_video_id)
-    # ytpull does blocking HTTP (up to 2x10s); keep it off the event loop so
-    # voice heartbeats and commands keep running meanwhile.
-    url, time = await asyncio.to_thread(ytpull, query, is_video_id)
-    logger.debug("play_audio: ytpull -> url=%s duration=%s", url, time)
-    if url is None:
-        await ctx.send(f"{ytvideolistnames([query])[0] if is_video_id else query} not found, skipping to next song")
-        return False
+def _make_playback_callbacks(ctx, st, ytid, watch_url, duration, gen):
+    """Build the after(error) callback for a song that is about to play.
 
-    source = await audiostream(url, loop=bot.loop, stream=True)
-    if source is None:
-        await ctx.send(f"{ytvideolistnames([query])[0] if is_video_id else query} not found, skipping to next song")
-        return False
-    data = source[1]
-    # empty/invisible titles: use "_" as a visible placeholder. Whitespace-only
-    # labels (space/nbsp) are NOT rendered as links by Discord (it trims them and
-    # shows raw markdown), and invisible chars are zero-width (nothing to click).
-    # A single "_" renders literally (italic needs a _pair_) and stays clickable.
-    title = clean_title(data.get('title'), fallback="_")
-    ytid = data.get('id') or query
+    Handles the three ways a song ends: a genuine end (advance the queue), a
+    CDN tail drop (EOF before the known duration), and a mid-stream break.
+    The latter two re-resolve a FRESH signed URL and resume from the break
+    point — a fresh URL is byte-seekable (206 Range requests), so -ss lands
+    directly with no download-from-0 penalty and no temp file.
 
-    # per-song state: position clock + recovery retry count + generation guard.
-    # Bumping the generation here (and in skip/play) invalidates any in-flight
-    # recovery or stale after-callback from the previous player, so a user
-    # action can't double-advance the queue.
-    state = _bump_generation(ctx.guild.id)
-    gen = state.generation
-    state.pos.seek_to(0.0)   # fresh song starts at 0
-    state.retries = 0
-    state.tail_resume_positions = []
+    Module-level (not nested in play_audio) so /resume can hand a re-joined
+    song the same recovery machinery.
+    """
 
     async def on_finished():
         # after(None) means the stream hit EOF. That is EITHER a genuine end,
@@ -842,9 +821,9 @@ async def play_audio(ctx: commands.Context, query, is_video_id):
         st = _states.get(ctx.guild.id)
         logger.debug("on_finished for %s (gen %d, current gen %s, pos %.1fs of %ss)",
                      ytid, gen, st.generation if st else None,
-                     st.pos.seconds() if st else -1.0, data.get('duration'))
+                     st.pos.seconds() if st else -1.0, duration)
         if st is not None and st.generation == gen:
-            dur = data.get('duration')
+            dur = duration
             pos = st.pos.seconds()
             if dur and pos < dur - TAIL_TOLERANCE:
                 # Progress guard: if we've already resumed from (near) this
@@ -925,7 +904,7 @@ async def play_audio(ctx: commands.Context, query, is_video_id):
             vc.stop()
         except Exception:
             pass
-        fresh = await audiostream(url, loop=bot.loop, stream=True, start=start)
+        fresh = await audiostream(watch_url, loop=bot.loop, stream=True, start=start)
         if fresh is None:
             logger.error("re-extract failed for %s; skipping song", ytid)
             await play_next_song(ctx)
@@ -941,7 +920,7 @@ async def play_audio(ctx: commands.Context, query, is_video_id):
             return
         st.pos.seek_to(start)
         try:
-            vc.play(fresh[0], after=_make_after(ctx, gen, on_finished, on_stream_error))
+            vc.play(fresh[0], after=after)
         except discord.ClientException as e:
             # something else grabbed the player (e.g. a concurrent play) — don't
             # fight it; the other path owns playback from here.
@@ -951,24 +930,23 @@ async def play_audio(ctx: commands.Context, query, is_video_id):
             except Exception:
                 pass
 
-    def _make_after(ctx, gen, on_finished, on_stream_error):
-        def after(error):
-            # Called from the audio-player thread; hop onto the event loop.
-            st = _states.get(ctx.guild.id)
-            logger.debug("after-callback for %s (gen %d, pos %.1fs): error=%r",
-                         ytid, gen, st.pos.seconds() if st else -1.0, error)
-            coro = on_finished() if error is None else on_stream_error(error)
-            try:
-                fut = asyncio.run_coroutine_threadsafe(coro, bot.loop)
-            except Exception:
-                logger.exception("failed to schedule after-callback")
-                coro.close()
-                return
-            # Nobody awaits this future, so an exception raised while advancing
-            # the queue used to vanish without a trace and playback just
-            # stopped (Sept 24 21:51). Always log it.
-            fut.add_done_callback(_log_after_result)
-        return after
+    def after(error):
+        # Called from the audio-player thread; hop onto the event loop.
+        st = _states.get(ctx.guild.id)
+        logger.debug("after-callback for %s (gen %d, pos %.1fs): error=%r",
+                     ytid, gen, st.pos.seconds() if st else -1.0, error)
+        coro = on_finished() if error is None else on_stream_error(error)
+        try:
+            fut = asyncio.run_coroutine_threadsafe(coro, bot.loop)
+        except Exception:
+            logger.exception("failed to schedule after-callback")
+            coro.close()
+            return
+        # Nobody awaits this future, so an exception raised while advancing
+        # the queue used to vanish without a trace and playback just
+        # stopped (Sept 24 21:51). Always log it.
+        fut.add_done_callback(_log_after_result)
+    return after
 
     def _log_after_result(fut):
         if fut.cancelled():
@@ -979,8 +957,51 @@ async def play_audio(ctx: commands.Context, query, is_video_id):
             logger.error("after-callback for %s raised; queue may have stalled", ytid,
                          exc_info=(type(exc), exc, exc.__traceback__))
 
+
+async def play_audio(ctx: commands.Context, query, is_video_id):
+    # plays audio and sends the embed into chat.
+    # Returns True once a song is actually playing, False if the song could
+    # not be resolved/extracted (caller advances the queue). MUST NOT call
+    # play_next_song itself: callers may already hold play_lock, and
+    # asyncio.Lock is not re-entrant — the old recursive call deadlocked the
+    # whole queue on the first "not found" song (freeze: nothing could
+    # pause/resume/skip).
+    logger.info("play_audio: guild %s, query=%r is_video_id=%s", ctx.guild.id, query, is_video_id)
+    # ytpull does blocking HTTP (up to 2x10s); keep it off the event loop so
+    # voice heartbeats and commands keep running meanwhile.
+    url, time = await asyncio.to_thread(ytpull, query, is_video_id)
+    logger.debug("play_audio: ytpull -> url=%s duration=%s", url, time)
+    if url is None:
+        await ctx.send(f"{ytvideolistnames([query])[0] if is_video_id else query} not found, skipping to next song")
+        return False
+
+    source = await audiostream(url, loop=bot.loop, stream=True)
+    if source is None:
+        await ctx.send(f"{ytvideolistnames([query])[0] if is_video_id else query} not found, skipping to next song")
+        return False
+    data = source[1]
+    # empty/invisible titles: use "_" as a visible placeholder. Whitespace-only
+    # labels (space/nbsp) are NOT rendered as links by Discord (it trims them and
+    # shows raw markdown), and invisible chars are zero-width (nothing to click).
+    # A single "_" renders literally (italic needs a _pair_) and stays clickable.
+    title = clean_title(data.get('title'), fallback="_")
+    ytid = data.get('id') or query
+
+    # per-song state: position clock + recovery retry count + generation guard.
+    # Bumping the generation here (and in skip/play) invalidates any in-flight
+    # recovery or stale after-callback from the previous player, so a user
+    # action can't double-advance the queue.
+    state = _bump_generation(ctx.guild.id)
+    gen = state.generation
+    state.pos.seek_to(0.0)   # fresh song starts at 0
+    state.retries = 0
+    state.tail_resume_positions = []
+    state.current = {'url': url, 'ytid': ytid, 'title': title,
+                     'duration': data.get('duration')}
+    after_cb = _make_playback_callbacks(ctx, state, ytid, url, data.get('duration'), gen)
+
     logger.info("starting playback of %s %r [%s] (gen %d)", ytid, title, time, gen)
-    ctx.voice_client.play(source[0], after=_make_after(ctx, gen, on_finished, on_stream_error))
+    ctx.voice_client.play(source[0], after=after_cb)
     # The song is playing from here on: a failure to post the embed must not
     # propagate, or play_next_song would treat the song as failed and try to
     # start another one on top of it.
@@ -1039,6 +1060,9 @@ async def play_next_song(ctx: commands.Context):
             if Queue_Object.is_queue_empty():
                 # if end of queue is reached
                 logger.info("play_next_song: end of queue in guild %s", ctx.guild.id)
+                st = _states.get(ctx.guild.id)
+                if st is not None:
+                    st.current = None  # nothing left to "resume" to
                 await ctx.send("End of queue reached!")
                 return
             # gets latest song from queue and plays
@@ -1094,8 +1118,50 @@ async def resume(ctx: commands.Context):
             await ctx.send("Resumed!")
         else:
             await ctx.send("Music already playing. Do you mean to pause?")
-    else:
-        await ctx.send("Nothing is playing. If you want to restart existing queue type just annu play")
+        return
+
+    # No voice client. Auto-leave dropped us from voice with a song in flight:
+    # re-join the requester's VC and restart THAT song from the frozen
+    # position. The song is not in the queue (popped when it started), so the
+    # queue can't restart it — the position lives on the SongState.
+    st = _states.get(ctx.guild.id)
+    if st is not None and st.current is not None:
+        if ctx.author.voice is None:
+            return await ctx.send("Join a voice channel first, then `annu resume`.")
+        song = st.current
+        pos = st.pos.seconds()
+        loading = await ctx.send(f"Rejoining at {int(pos // 60)}:{int(pos % 60):02d}...")
+        await ctx.author.voice.channel.connect()
+        # Bump so any stale callback from before the disconnect no-ops; the
+        # position clock restarts reading exactly at the paused second.
+        st = _bump_generation(ctx.guild.id)
+        st.pos.seek_to(pos)
+        fresh = await audiostream(song['url'], loop=bot.loop, stream=True, start=pos)
+        if fresh is None:
+            st.current = None
+            return await loading.edit(content="Couldn't restart that stream — use `annu play` to start fresh.")
+        # The extract above awaited; a skip/play may have replaced this song in
+        # the meantime. If so, drop the recovery — the new song owns the player.
+        if _states.get(ctx.guild.id) is None or _states[ctx.guild.id].generation != st.generation:
+            try:
+                fresh[0].cleanup()
+            except Exception:
+                pass
+            return
+        after_cb = _make_playback_callbacks(ctx, st, song['ytid'], song['url'],
+                                            song['duration'], st.generation)
+        try:
+            ctx.voice_client.play(fresh[0], after=after_cb)
+        except discord.ClientException as e:
+            try:
+                fresh[0].cleanup()
+            except Exception:
+                pass
+            return await loading.edit(content=f"Couldn't resume ({type(e).__name__}).")
+        _autopaused.discard(ctx.guild.id)
+        await loading.edit(content=f"Resumed at {int(pos // 60)}:{int(pos % 60):02d}.")
+        return
+    await ctx.send("Nothing is playing. If you want to restart existing queue type just annu play")
 
 # skips current song
 @bot.hybrid_command(name='skip', description="Skips to next song", aliases=['next', 'agla'], pass_context=True)

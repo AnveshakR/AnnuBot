@@ -42,7 +42,10 @@ class FakeVC:
         return self.paused
 
     def is_playing(self):
-        return False
+        return getattr(self, "playing", False)
+
+    def pause(self):
+        self.paused = True
 
     def resume(self):
         self.paused = False
@@ -146,6 +149,23 @@ async def main():
     assert not vc.paused, "music should have resumed when someone re-joined"
     assert guild.id not in A._autopaused, "auto-pause flag should be cleared"
     print("PASS 6: auto-paused music resumed when someone re-joined")
+
+    # ---- Scenario 7: auto-leave PAUSES the music, then leaves (state kept)
+    # The in-flight song is not in the queue; /resume restarts it from the
+    # frozen position, so the bot must leave paused, not playing.
+    A._leave_tasks.clear()
+    channel5 = FakeChannel("PauseLeave")
+    add(channel5, A.bot.user)
+    vc.channel = channel5
+    vc.playing = True
+    A._autopaused.clear()
+    await A.on_voice_state_update(A.bot.user, State(None), State(channel5))
+    assert A._leave_tasks.get(guild.id) is not None, "bot-join-empty should start countdown"
+    await asyncio.sleep(0.2)
+    assert vc.disconnected, "bot should have left the empty VC"
+    assert vc.paused, "music should be paused when the bot leaves"
+    assert guild.id in A._autopaused, "auto-pause flag should be set for /resume"
+    print("PASS 7: auto-leave pauses the music, then leaves (position preserved)")
 
     print("\nALL AUTO-LEAVE LOGIC TESTS PASSED")
 
