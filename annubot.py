@@ -1395,24 +1395,27 @@ async def skip(ctx: commands.Context, *, query=""):
     return await ctx.send("Skipped!")
 
 QUEUE_PAGE_SIZE = 20
+# Queue embeds the bot has rendered, with the page currently shown:
+# {message_id: page}. Messages from before a restart aren't in the map, so
+# arrows on those are ignored.
+queue_view_pages = {}
 
-# displays queue, one page per message
-@bot.hybrid_command(name='queue', description="Displays the song queue (20 per page)", pass_context=True)
-async def display_queue(ctx: commands.Context, page: int = 1):
-    Queue_Object = GuildQueue.instances.get(ctx.guild.id)
-    queuelist = Queue_Object.display_queue() if Queue_Object is not None else None
-    if not queuelist:
-        return await ctx.send("No songs in queue.")
 
+def _queue_pages(total):
+    return max(1, (total + QUEUE_PAGE_SIZE - 1) // QUEUE_PAGE_SIZE)
+
+
+async def _queue_embed(queuelist, page):
+    """Build the embed for one page of the (live) queue. Returns (embed, page)."""
     total = len(queuelist)
-    pages = (total + QUEUE_PAGE_SIZE - 1) // QUEUE_PAGE_SIZE
+    pages = _queue_pages(total)
     page = min(max(page, 1), pages)
     first = (page - 1) * QUEUE_PAGE_SIZE
     shown = queuelist[first:first + QUEUE_PAGE_SIZE]
 
     # Titles only for this page's YouTube entries (one API call, off the loop).
     ids = [q for q, is_vid in shown if is_vid]
-    titles = dict(zip(ids, await asyncio.to_thread(ytvideolistnames, ids)))
+    titles = dict(zip(ids, await asyncio.to_thread(ytvideolistnames, ids))) if ids else {}
 
     lines = []
     for num, (q, is_vid) in enumerate(shown, start=first + 1):
@@ -1420,14 +1423,60 @@ async def display_queue(ctx: commands.Context, page: int = 1):
         if len(name) > 80:
             name = name[:79] + "…"
         lines.append(f"{num}) {name}")
-    header = f"**Queue: {total} song{'s' if total != 1 else ''}**" + (f" (page {page}/{pages})" if pages > 1 else "")
-    footer = f"\n`/queue page:{page + 1}` for more" if page < pages else ""
-    msg = header + "\n" + "\n".join(lines) + footer
-    # 20 lines x ~85 chars stays under Discord's 2000-char cap; trim if not.
-    while len(msg) > 2000 and lines:
-        lines.pop()
-        msg = header + "\n" + "\n".join(lines) + footer
-    await ctx.send(msg)
+    title = f"Queue: {total} song{'s' if total != 1 else ''}"
+    if pages > 1:
+        title += f" (page {page}/{pages})"
+    embed = discord.Embed(title=title, description="\n".join(lines),
+                          color=discord.Colour(0x7289DA))
+    return embed, page
+
+
+# displays the queue as an embed; arrows page through it
+@bot.hybrid_command(name='queue', description="Displays the song queue (use the arrows to page)", pass_context=True)
+async def display_queue(ctx: commands.Context):
+    Queue_Object = GuildQueue.instances.get(ctx.guild.id)
+    queuelist = Queue_Object.display_queue() if Queue_Object is not None else None
+    if not queuelist:
+        return await ctx.send("No songs in queue.")
+
+    embed, page = await _queue_embed(queuelist, 1)
+    msg = await ctx.send(embed=embed)
+    queue_view_pages[msg.id] = page
+    if _queue_pages(len(queuelist)) > 1:
+        await msg.add_reaction("◀️")
+        await msg.add_reaction("▶️")
+
+
+# arrow reactions on a queue embed: re-render the page the user asked for
+async def _on_queue_reaction(reaction, user):
+    if user.bot:
+        return
+    emoji = str(reaction.emoji)
+    if emoji not in ("◀️", "▶️"):
+        return
+    msg = reaction.message
+    if msg.author != bot.user:  # only our own queue embeds
+        return
+    page = queue_view_pages.get(msg.id)
+    if page is None:  # queue message from before a restart
+        return
+    queuelist = _guild_queue(msg.guild.id).display_queue()
+    if not queuelist:
+        queue_view_pages.pop(msg.id, None)
+        embed = discord.Embed(title="Queue: empty", description="No songs in queue.",
+                              color=discord.Colour(0x7289DA))
+        await msg.edit(content=None, embeds=[embed])
+        return
+    pages = _queue_pages(len(queuelist))
+    new_page = min(max(page + (1 if emoji == "▶️" else -1), 1), pages)
+    if new_page == page:
+        return
+    queue_view_pages[msg.id] = new_page
+    embed, _ = await _queue_embed(queuelist, new_page)
+    await msg.edit(content=None, embeds=[embed])
+
+
+bot.add_listener(_on_queue_reaction, "on_reaction_add")
 
 @bot.hybrid_command(name='fangs', description="Plays Sheishen by Keylo X FANGS", hidden=True)
 async def fangs(ctx: commands.Context):
@@ -1495,7 +1544,7 @@ async def help(ctx: commands.Context):
     "`play [baja]:` Plays song/playlist from YouTube or Apple Music (set the `shuffle` option, or end a prefix command with `shuffle`, to shuffle a playlist)\n"
     "`playnext:` Like play, but plays it next, before the rest of the queue\n"
     "`irshad [sher]:` Get an authentic Annu Malik shayari!\n"
-    "`queue [page]:` Shows the queue, 20 songs per page\n"
+    "`queue:` Shows the queue (use the arrow reactions to page)\n"
     "`skip [next, agla] <number>:` Goes to next song or to the index specified\n"
     "`join [connect]:` Connects to your voice channel\n"
     "`pause [ruk]:` Pauses playback\n"
