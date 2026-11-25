@@ -398,18 +398,18 @@ def request(query) -> Tuple[list, bool]:
     if is_youtube_link(query): # if request is a youtube link
         video_id = None
         playlist_id = None
+        parsed = urlparse(query)
 
-        # Extract video_id and playlist_id based on different URL types
-        if "youtu.be" in query:
-            video_id = re.search("youtu\.be/([^\?&]+)?", query)[1]
-        elif "start_radio" in query:
+        # Only a real playlist page (youtube.com/playlist?list=...) adds a
+        # playlist — that includes RD... radio-mix pages, which ARE playlist
+        # pages. watch?v=... links routinely carry extra params that are NOT
+        # playlists: si= (tracking), t= (start time), index= (position in a
+        # list), pp= (player config), and list=RD...&start_radio=1 (radio).
+        # Those all play just the single video.
+        if parsed.netloc in ('www.youtube.com', 'youtube.com') and parsed.path == '/playlist':
             playlist_id = query.split("list=")[-1].split("&")[0]
-        elif "index" in query and "pp" in query:
-            video_id = query.split("v=")[-1].split("&")[0]
-        elif "pp=" in query:
-            video_id = query.split("v=")[-1].split("&")[0]
-        elif "list=" in query:
-            playlist_id = query.split("list=")[-1].split("&")[0]
+        elif "youtu.be" in query:
+            video_id = re.search("youtu\\.be/([^\?&]+)?", query)[1]
         elif "v=" in query:
             video_id = query.split("v=")[-1].split("&")[0]
         
