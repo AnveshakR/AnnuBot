@@ -391,6 +391,15 @@ class GuildQueue:
         logger.debug("guild %s: queued %r (now %d)", self.guild_id, song, self.guild_queue.qsize())
         self._save()
 
+    # adds items to the TOP of the queue, preserving their order (the first
+    # item plays next). Appends in reverse onto the internal deque (same
+    # access pattern as display_queue) so the order holds.
+    def put_in_queue_front(self, songs):
+        for song in reversed(songs):
+            self.guild_queue.queue.appendleft(song)
+        logger.debug("guild %s: queued %d at front (now %d)", self.guild_id, len(songs), self.guild_queue.qsize())
+        self._save()
+
     # pulls item from top of queue
     def get_latest_from_queue(self):
         if not self.is_queue_empty():
@@ -873,15 +882,9 @@ async def shayari(ctx: commands.Context):
     # random shayri
     await ctx.send(f'Annu says: {random.choice(sher)}')
 
-# play song based on youtube or apple music links, or a general query.
-# `query` is REQUIRED: Discord only drops the cursor straight into an option
-# (so text typed after /play lands in it) when that option is required. As
-# optional, a typed song was silently dropped and /play ran with no query.
-# Continuing the queue / a paused song is /resume's job.
-@bot.hybrid_command(name='play', description="Plays a song or playlist from YouTube or Apple Music", aliases=['baja'], pass_context=True)
-@app_commands.describe(query="Song name, or a YouTube / Apple Music link",
-                       shuffle="Shuffle a playlist as it's added")
-async def play(ctx: commands.Context, *, query: str, shuffle: bool = False):
+# Shared core for /play and /playnext: `front` inserts the added items at
+# the TOP of the queue instead of the back.
+async def _play(ctx: commands.Context, query, shuffle, front):
 
     loading_msg = await ctx.send("Loading...")
 
@@ -924,14 +927,18 @@ async def play(ctx: commands.Context, *, query: str, shuffle: bool = False):
     items = list(dict.fromkeys(items))
     if shuffle and len(items) > 1:
         random.shuffle(items)
-    for item in items:
-        Queue_Object.put_in_queue((item, is_video_id))
+    if front:
+        # One front insert for the whole add keeps the playlist's order.
+        Queue_Object.put_in_queue_front([(item, is_video_id) for item in items])
+    else:
+        for item in items:
+            Queue_Object.put_in_queue((item, is_video_id))
     if len(items) > 1:
-        added = f"Added {len(items)} songs" + (" and shuffled them" if shuffle else "")
+        added = f"Added {len(items)} songs" + (" to the top" if front else "") + (" and shuffled them" if shuffle else "")
         if found > len(items):
             added += f" ({found - len(items)} repeats skipped)"
     else:
-        added = "Added to queue" if items else None
+        added = ("Added to top of queue" if front else "Added to queue") if items else None
 
     # A song interrupted mid-play (auto-leave / lost voice) wins over the
     # queue: pick it up where it stopped; anything just added plays after.
@@ -952,6 +959,25 @@ async def play(ctx: commands.Context, *, query: str, shuffle: bool = False):
         return await loading_msg.edit(content=f"{added}." if added else "Already playing.")
     await loading_msg.edit(content=f"{added}, now playing!" if added else "Resuming the queue!")
     return await play_next_song(ctx)
+
+# play song based on youtube or apple music links, or a general query.
+# `query` is REQUIRED: Discord only drops the cursor straight into an option
+# (so text typed after /play lands in it) when that option is required. As
+# optional, a typed song was silently dropped and /play ran with no query.
+# Continuing the queue / a paused song is /resume's job.
+@bot.hybrid_command(name='play', description="Plays a song or playlist from YouTube or Apple Music", aliases=['baja'], pass_context=True)
+@app_commands.describe(query="Song name, or a YouTube / Apple Music link",
+                       shuffle="Shuffle a playlist as it's added")
+async def play(ctx: commands.Context, *, query: str, shuffle: bool = False):
+    return await _play(ctx, query, shuffle, front=False)
+
+# /playnext: same as /play, but the added song(s) go to the TOP of the queue
+# — the new song plays next, before whatever was already queued.
+@bot.hybrid_command(name='playnext', description="Plays a song or playlist next, before the rest of the queue", pass_context=True)
+@app_commands.describe(query="Song name, or a YouTube / Apple Music link",
+                       shuffle="Shuffle a playlist as it's added")
+async def playnext(ctx: commands.Context, *, query: str, shuffle: bool = False):
+    return await _play(ctx, query, shuffle, front=True)
 
 def _make_playback_callbacks(ctx, st, ytid, watch_url, duration, gen):
     """Build the after(error) callback for a song that is about to play.
@@ -1467,6 +1493,7 @@ async def help(ctx: commands.Context):
     helpembed.color = discord.Colour(0x7289DA)
     helpembed.description = (
     "`play [baja]:` Plays song/playlist from YouTube or Apple Music (set the `shuffle` option, or end a prefix command with `shuffle`, to shuffle a playlist)\n"
+    "`playnext:` Like play, but plays it next, before the rest of the queue\n"
     "`irshad [sher]:` Get an authentic Annu Malik shayari!\n"
     "`queue [page]:` Shows the queue, 20 songs per page\n"
     "`skip [next, agla] <number>:` Goes to next song or to the index specified\n"

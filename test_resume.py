@@ -216,6 +216,40 @@ def main():
     assert ctx.log[-1] == "Added 3 songs and shuffled them (4 repeats skipped).", ctx.log
     print("PASS 10: shuffle option works; mix repeats skipped; reply says so")
 
+    # 11. /playnext <song> while a song is playing: inserts at the TOP of the queue
+    calls = []; stub(calls)
+    g = fresh_guild(11); vch = VoiceChannel(g, "General")
+    g.vc = FakeVC(g, vch); g.vc.playing = True
+    A._guild_queue(11).put_in_queue(('vidA', True))
+    ctx = Ctx(g, vch)
+    run(A.playnext.callback(ctx, query='vidB'))
+    q = A.GuildQueue.instances[11].display_queue()
+    assert q == [('vidB', False), ('vidA', True)], q
+    assert ('play_next_song',) not in calls, calls
+    print("PASS 11: /playnext inserts at the top of the queue; no second song started")
+
+    # 12. /playnext <playlist> while a song is playing: playlist goes to the top, in order
+    calls = []; stub(calls)
+    g = fresh_guild(12); vch = VoiceChannel(g, "General")
+    g.vc = FakeVC(g, vch); g.vc.playing = True
+    A._guild_queue(12).put_in_queue(('vidA', True))
+    ctx = Ctx(g, vch)
+    run(A.playnext.callback(ctx, query='https://youtube.com/playlist?list=abc'))
+    q = A.GuildQueue.instances[12].display_queue()
+    assert q == [('vid1', True), ('vid2', True), ('vid3', True), ('vidA', True)], q
+    assert ('play_next_song',) not in calls, calls
+    print("PASS 12: /playnext playlist lands at the top, in order, before the old queue")
+
+    # 13. /playnext <song> while idle: plays immediately
+    calls = []; stub(calls)
+    g = fresh_guild(13); vch = VoiceChannel(g, "General")
+    ctx = Ctx(g, vch)
+    run(A.playnext.callback(ctx, query='vidB'))
+    assert ('play_next_song',) in calls, calls
+    assert A.GuildQueue.instances[13].display_queue() == [('vidB', False)], \
+        A.GuildQueue.instances[13].display_queue()
+    print("PASS 13: /playnext while idle plays the song immediately")
+
     print("\nALL PLAY/RESUME TESTS PASSED")
 
 
